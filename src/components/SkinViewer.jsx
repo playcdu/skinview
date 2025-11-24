@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
 import * as skinview3d from 'skinview3d'
 import { PlayerObject } from 'skinview3d'
-import { Group, Texture, TextureLoader, CanvasTexture } from 'three'
+import { Group, Texture, TextureLoader, CanvasTexture, Raycaster, Vector2, Vector3, Box3, Sphere, Plane } from 'three'
 import { NameTagObject } from './NameTagObject'
 import Starfield from './Starfield'
 import './SkinViewer.css'
@@ -72,24 +72,87 @@ const ANIMATION_STATES = {
   IDLE: 'idle',
   WALK: 'walk',
   HIT: 'hit',
-  WAVE: 'wave'
+  WAVE: 'wave',
+  RUN: 'run'
+}
+
+// Idle animation - character stands still with subtle arm movement
+const IdleAnimation = (player, progress) => {
+  const skin = player.skin
+  // Multiply by animation's natural speed
+  const t = progress * 2
+  
+  // Arm swing - subtle movement
+  const basicArmRotationZ = Math.PI * 0.02
+  skin.leftArm.rotation.z = Math.cos(t) * 0.03 + basicArmRotationZ
+  skin.rightArm.rotation.z = Math.cos(t + Math.PI) * 0.03 - basicArmRotationZ
+  
+  // Reset other rotations to idle state
+  skin.leftLeg.rotation.x = 0
+  skin.rightLeg.rotation.x = 0
+  skin.leftArm.rotation.x = 0
+  skin.rightArm.rotation.x = 0
+  skin.head.rotation.y = 0
+  skin.head.rotation.x = 0
+  
+  // Cape rotation if cape exists
+  if (player.cape) {
+    const basicCapeRotationX = Math.PI * 0.06
+    player.cape.rotation.x = Math.sin(t) * 0.01 + basicCapeRotationX
+    player.cape.visible = false
+  }
 }
 
 
-const PunchingAnimation = (player, time) => {
+// Hit animation - based on skinview3d HitAnimation class
+const HitAnimation = (player, progress) => {
   const skin = player.skin
-  // Punch animation - quick arm forward motion
-  time *= 10
-  const punchCycle = Math.sin(time)
-  // Right arm punches forward
-  skin.rightArm.rotation.x = punchCycle > 0 ? -Math.PI * 0.7 : -Math.PI * 0.2
-  skin.rightArm.rotation.z = punchCycle > 0 ? Math.PI * 0.1 : Math.PI * 0.02
-  // Left arm pulls back slightly
-  skin.leftArm.rotation.x = punchCycle > 0 ? Math.PI * 0.3 : Math.PI * 0.1
-  // Slight body rotation
-  skin.body.rotation.y = punchCycle > 0 ? Math.PI * 0.05 : 0
-  // Head follows punch
-  skin.head.rotation.y = punchCycle > 0 ? Math.PI * 0.03 : 0
+  const t = progress * 18
+  
+  skin.rightArm.rotation.x = -0.4537860552 * 2 + 2 * Math.sin(t + Math.PI) * 0.3
+  const basicArmRotationZ = 0.01 * Math.PI + 0.06
+  skin.rightArm.rotation.z = -Math.cos(t) * 0.403 + basicArmRotationZ
+  skin.body.rotation.y = -Math.cos(t) * 0.06
+  skin.leftArm.rotation.x = Math.sin(t + Math.PI) * 0.077
+  skin.leftArm.rotation.z = -Math.cos(t) * 0.015 + 0.13 - 0.05
+  skin.leftArm.position.z = Math.cos(t) * 0.3
+  skin.leftArm.position.x = 5 - Math.cos(t) * 0.05
+}
+
+// Running animation - based on skinview3d RunningAnimation class
+const RunningAnimation = (player, progress) => {
+  const skin = player.skin
+  // Multiply by animation's natural speed
+  const t = progress * 15 + Math.PI * 0.5
+  
+  // Leg swing with larger amplitude
+  skin.leftLeg.rotation.x = Math.cos(t + Math.PI) * 1.3
+  skin.rightLeg.rotation.x = Math.cos(t) * 1.3
+  
+  // Arm swing
+  skin.leftArm.rotation.x = Math.cos(t) * 1.5
+  skin.rightArm.rotation.x = Math.cos(t + Math.PI) * 1.5
+  const basicArmRotationZ = Math.PI * 0.1
+  skin.leftArm.rotation.z = Math.cos(t) * 0.1 + basicArmRotationZ
+  skin.rightArm.rotation.z = Math.cos(t + Math.PI) * 0.1 - basicArmRotationZ
+  
+  // Jumping
+  player.position.y = Math.cos(t * 2)
+  
+  // Dodging when running
+  player.position.x = Math.cos(t) * 0.15
+  
+  // Slightly tilting when running
+  player.rotation.z = Math.cos(t + Math.PI) * 0.01
+  
+  // Apply higher swing frequency, lower amplitude,
+  // and greater basic rotation around x axis,
+  // to cape when running.
+  if (player.cape) {
+    const basicCapeRotationX = Math.PI * 0.3
+    player.cape.rotation.x = Math.sin(t * 2) * 0.1 + basicCapeRotationX
+    player.cape.visible = false
+  }
 }
 
 // Custom walking animation without head bobbing - faster animation, slower movement
@@ -163,12 +226,24 @@ function SkinViewerComponent() {
   const skinBlobUrlRef = useRef(null)
   const lastFrameTimeRef = useRef(0)
   const syncIntervalRef = useRef(null) // Store sync interval for cleanup
+  const raycasterRef = useRef(null) // Raycaster for click detection
+  const handleClickRef = useRef(null) // Store click handler for cleanup
+  const handleMouseMoveRef = useRef(null) // Store mousemove handler for cleanup
+  const handleMouseDownRef = useRef(null) // Store mousedown handler for cleanup
+  const handleDragMoveRef = useRef(null) // Store drag move handler for cleanup
+  const handleMouseUpRef = useRef(null) // Store mouseup handler for cleanup
+  const hoveredCharRef = useRef(null) // Currently hovered character
+  const removeHoverEffectRef = useRef(null) // Store removeHoverEffect function for cleanup
+  const draggedCharRef = useRef(null) // Currently dragged character
+  const isDraggingRef = useRef(false) // Whether user is currently dragging
+  const dragStartTimeRef = useRef(0) // Time when drag started
   const targetFPS = 24
   const frameInterval = 1000 / targetFPS // ~41.67ms per frame at 24fps
   
   const [animationKey, setAnimationKey] = useState(0)
   const [currentAnimation, setCurrentAnimation] = useState(ANIMATION_STATES.IDLE)
   const [chatMessages, setChatMessages] = useState([]) // Store chat messages
+  const [playerCount, setPlayerCount] = useState(0) // Total number of players online
   const isInitialLoadRef = useRef(true) // Track if this is the initial load
   const chatMessagesRef = useRef(null) // Ref for chat messages container
   
@@ -227,6 +302,366 @@ function SkinViewerComponent() {
     control.enablePan = false
     controlsRef.current = control
     
+    // Create raycaster for click detection
+    const raycaster = new Raycaster()
+    raycasterRef.current = raycaster
+    
+    // Helper function to find character closest to mouse
+    function findCharacterUnderMouse(event) {
+      const rect = canvas.getBoundingClientRect()
+      const mouseX = event.clientX - rect.left
+      const mouseY = event.clientY - rect.top
+      
+      const allCharacters = charactersRef.current || []
+      let closestChar = null
+      let closestDistance = Infinity
+      
+      // Update camera matrices
+      skinViewer.camera.updateMatrixWorld()
+      
+      // Project each character's position to screen coordinates and find closest
+      allCharacters.forEach((char) => {
+        if (char.group && char.player) {
+          // Get the world position of the character group
+          const worldPosition = new Vector3()
+          char.group.getWorldPosition(worldPosition)
+          
+          // Project 3D position to screen coordinates
+          const screenPosition = worldPosition.clone()
+          screenPosition.project(skinViewer.camera)
+          
+          // Convert normalized device coordinates to screen pixels
+          const screenX = (screenPosition.x * 0.5 + 0.5) * rect.width
+          const screenY = (-screenPosition.y * 0.5 + 0.5) * rect.height
+          
+          // Calculate distance from mouse to character in screen space
+          const dx = screenX - mouseX
+          const dy = screenY - mouseY
+          const distance = Math.sqrt(dx * dx + dy * dy)
+          
+          // Check if this character is closer than the current closest
+          if (distance < closestDistance) {
+            closestDistance = distance
+            closestChar = char
+          }
+        }
+      })
+      
+      // Only return if within a reasonable distance (e.g., 100 pixels)
+      if (closestChar && closestDistance < 100) {
+        return closestChar
+      }
+      
+      return null
+    }
+    
+    // Handle mouse move for hover detection
+    const handleMouseMove = (event) => {
+      event.preventDefault() // Prevent text selection
+      const hoveredChar = findCharacterUnderMouse(event)
+      
+      // Remove hover effect from previous character
+      if (hoveredCharRef.current && hoveredCharRef.current !== hoveredChar) {
+        removeHoverEffect(hoveredCharRef.current)
+      }
+      
+      // Apply hover effect to new character
+      if (hoveredChar && hoveredChar !== hoveredCharRef.current) {
+        applyHoverEffect(hoveredChar)
+        canvas.style.cursor = 'pointer'
+      } else if (!hoveredChar) {
+        canvas.style.cursor = 'default'
+      }
+      
+      hoveredCharRef.current = hoveredChar
+    }
+    
+    // Handle mouse down / touch start - start drag or prepare for click
+    const handleMouseDown = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      
+      const hitChar = findCharacterUnderMouse(event)
+      if (hitChar) {
+        draggedCharRef.current = hitChar
+        isDraggingRef.current = false
+        dragStartTimeRef.current = Date.now()
+        canvas.style.cursor = 'grabbing'
+        
+        // Switch to idle animation and start floating
+        hitChar.animationState = ANIMATION_STATES.IDLE
+        hitChar.isFloating = true
+        hitChar.floatHeight = 3.0 // Float 3 units above ground
+        hitChar.dropVelocity = 0 // Reset drop velocity
+        hitChar.animProgress = 0 // Reset animation progress for idle
+      }
+    }
+    
+    // Handle mouse move / touch move - drag character if dragging
+    const handleDragMove = (event) => {
+      if (!draggedCharRef.current) return
+      
+      const rect = canvas.getBoundingClientRect()
+      const clientX = event.clientX !== undefined ? event.clientX : event.touches?.[0]?.clientX
+      const clientY = event.clientY !== undefined ? event.clientY : event.touches?.[0]?.clientY
+      
+      if (clientX === undefined || clientY === undefined) return
+      
+      // Check if we've moved enough to consider it a drag
+      const mouse = new Vector2()
+      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1
+      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1
+      
+      // Project mouse to ground plane (y = 0)
+      raycaster.setFromCamera(mouse, skinViewer.camera)
+      
+      // Create a plane at y = 0 (ground level)
+      const planeNormal = new Vector3(0, 1, 0)
+      const plane = new Plane(planeNormal, 0)
+      
+      const intersectionPoint = new Vector3()
+      raycaster.ray.intersectPlane(plane, intersectionPoint)
+      
+      if (intersectionPoint) {
+        isDraggingRef.current = true
+        
+        // Move character to intersection point
+        const char = draggedCharRef.current
+        if (char && char.group && char.path) {
+          // Update path position directly
+          char.path.x = intersectionPoint.x
+          char.path.z = intersectionPoint.z
+          
+          // Also update group position immediately (less lerp for dragging)
+          char.group.position.x = intersectionPoint.x
+          char.group.position.z = intersectionPoint.z
+          
+          // Keep character floating while dragging
+          if (char.isFloating) {
+            char.group.position.y = char.floatHeight || 3.0
+          }
+        }
+      }
+    }
+    
+    // Handle mouse up / touch end - end drag or hit character
+    const handleMouseUp = (event) => {
+      if (!draggedCharRef.current) return
+      
+      const char = draggedCharRef.current
+      const dragDuration = Date.now() - dragStartTimeRef.current
+      const wasDragging = isDraggingRef.current
+      
+      // Store the character before cleaning up drag state
+      const draggedCharacter = char
+      
+      // Clean up drag state first
+      draggedCharRef.current = null
+      isDraggingRef.current = false
+      
+      // If it was a quick click (< 200ms) and not dragged much, hit the character
+      if (!wasDragging && dragDuration < 200) {
+        // Quick click - hit the character
+        removeHoverEffect(draggedCharacter)
+        hitCharacter(skinViewer, draggedCharacter)
+        // Reset floating state
+        draggedCharacter.isFloating = false
+        draggedCharacter.group.position.y = 0
+      } else if (wasDragging) {
+        // Was dragging - drop the character (don't hit them)
+        draggedCharacter.isFloating = false
+        draggedCharacter.dropVelocity = 0 // Start dropping
+        draggedCharacter.animationState = ANIMATION_STATES.WALK // Return to walking
+        // Mark that this was a drag release to prevent click handler from firing
+        draggedCharacter.wasJustDragged = true
+        setTimeout(() => {
+          draggedCharacter.wasJustDragged = false
+        }, 100) // Clear flag after 100ms
+      }
+      
+      hoveredCharRef.current = null
+      canvas.style.cursor = 'default'
+    }
+    
+    // Handle click to hit characters (fallback for quick clicks)
+    const handleClick = (event) => {
+      // Only handle click if we're not dragging and character wasn't just dragged
+      const hitChar = findCharacterUnderMouse(event)
+      if (hitChar && hitChar.wasJustDragged) {
+        // Character was just dragged, don't hit them
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      
+      if (!isDraggingRef.current && !draggedCharRef.current) {
+        event.preventDefault()
+        event.stopPropagation()
+        
+        if (hitChar) {
+          // Remove hover effect and apply hit effect
+          removeHoverEffect(hitChar)
+          hitCharacter(skinViewer, hitChar)
+          hoveredCharRef.current = null
+          canvas.style.cursor = 'default'
+        }
+      }
+    }
+    
+    // Function to apply hover effect (outline/glow)
+    function applyHoverEffect(char) {
+      if (!char.player || char.isHovered) return
+      
+      char.isHovered = true
+      char.originalEmissive = {}
+      
+      // Add white emissive glow to all materials
+      char.player.traverse((obj) => {
+        if (obj.material) {
+          const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+          materials.forEach((mat, idx) => {
+            if (mat.emissive !== undefined) {
+              const key = `${obj.uuid}-${idx}`
+              char.originalEmissive[key] = { ...mat.emissive }
+              mat.emissive.setHex(0x444444) // Subtle white glow
+              mat.emissiveIntensity = 0.3
+              mat.needsUpdate = true
+            }
+          })
+        }
+      })
+    }
+    
+    // Function to remove hover effect
+    function removeHoverEffect(char) {
+      if (!char || !char.player || !char.isHovered) return
+      
+      char.isHovered = false
+      
+      // Restore original emissive values
+      char.player.traverse((obj) => {
+        if (obj.material) {
+          const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+          materials.forEach((mat, idx) => {
+            const key = `${obj.uuid}-${idx}`
+            if (char.originalEmissive && char.originalEmissive[key]) {
+              mat.emissive.copy(char.originalEmissive[key])
+              mat.emissiveIntensity = 0
+              mat.needsUpdate = true
+            }
+          })
+        }
+      })
+      
+      char.originalEmissive = {}
+    }
+    
+    // Store removeHoverEffect for cleanup
+    removeHoverEffectRef.current = removeHoverEffect
+    
+    // Function to hit a character (user-initiated click)
+    function hitCharacter(skinViewer, char) {
+      // Skip if already being hit
+      if (char.isHit) return
+      
+      char.isHit = true
+      char.hitTimer = 0.6 // Red overlay duration (0.6 seconds - increased)
+      char.wasHitByPlayer = false // Mark as user-initiated hit (not player-to-player)
+      
+      // Apply red overlay to all materials
+      const redTint = { r: 1.5, g: 0.5, b: 0.5 } // Red tint
+      char.player.traverse((obj) => {
+        if (obj.material) {
+          const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+          materials.forEach(mat => {
+            if (mat.color) {
+              mat.color.r *= redTint.r
+              mat.color.g *= redTint.g
+              mat.color.b *= redTint.b
+              mat.needsUpdate = true
+            }
+          })
+        }
+      })
+      
+      // Apply knockback - upward and backward from camera direction
+      const cameraDirection = new Vector3()
+      skinViewer.camera.getWorldDirection(cameraDirection)
+      cameraDirection.normalize()
+      
+      // Knockback force: upward and away from camera (increased for more intensity)
+      const knockbackUp = 22 // Upward force (increased from 15)
+      const knockbackBack = 18 // Backward force (increased from 12)
+      
+      char.knockbackVelocity = {
+        x: -cameraDirection.x * knockbackBack,
+        y: knockbackUp,
+        z: -cameraDirection.z * knockbackBack
+      }
+      
+      char.gravity = 0.5 // Gravity strength
+      char.knockbackStartTime = Date.now() // Track when knockback started
+      char.knockbackMinDuration = 0.8 // Minimum knockback duration in seconds (ensures longer knockback)
+    }
+    
+    handleClickRef.current = handleClick
+    handleMouseMoveRef.current = handleMouseMove
+    handleMouseDownRef.current = handleMouseDown
+    handleDragMoveRef.current = handleDragMove
+    handleMouseUpRef.current = handleMouseUp
+    
+    // Verify canvas exists before adding listeners
+    if (!canvas) {
+      console.error('Canvas element not found!')
+      return
+    }
+    
+    console.log('Adding event listeners to canvas:', canvas)
+    console.log('Canvas dimensions:', canvas.width, canvas.height)
+    console.log('Canvas style:', window.getComputedStyle(canvas))
+    
+    // Prevent text selection on canvas and wrapper
+    const preventSelection = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      return false
+    }
+    
+    canvas.addEventListener('selectstart', preventSelection)
+    canvas.addEventListener('mousedown', preventSelection)
+    canvas.addEventListener('contextmenu', preventSelection)
+    canvas.addEventListener('dragstart', preventSelection)
+    
+    // Also prevent on wrapper
+    const wrapper = wrapperRef.current
+    if (wrapper) {
+      wrapper.addEventListener('selectstart', preventSelection)
+      wrapper.addEventListener('mousedown', preventSelection)
+      wrapper.addEventListener('contextmenu', preventSelection)
+      wrapper.addEventListener('dragstart', preventSelection)
+    }
+    
+    // Test handlers removed - events are working
+    
+    // Add main handlers with capture to ensure they fire
+    canvas.addEventListener('mousedown', handleMouseDown, { capture: true })
+    canvas.addEventListener('mousemove', handleMouseMove, { capture: true })
+    canvas.addEventListener('mousemove', handleDragMove, { capture: true })
+    canvas.addEventListener('mouseup', handleMouseUp, { capture: true })
+    canvas.addEventListener('click', handleClick, { capture: true })
+    
+    // Touch events for mobile
+    canvas.addEventListener('touchstart', handleMouseDown, { capture: true })
+    canvas.addEventListener('touchmove', handleDragMove, { capture: true })
+    canvas.addEventListener('touchend', handleMouseUp, { capture: true })
+    
+    // Also add to wrapper as backup
+    if (wrapper) {
+      wrapper.addEventListener('click', handleClick, { capture: true })
+      wrapper.addEventListener('mousemove', handleMouseMove, { capture: true })
+    }
+    
+    console.log('Event listeners added successfully to canvas and wrapper')
 
     // Fixed camera position - 45 degree angle from 500m away
     // Camera positioned 500 units away at 45 degree angle looking down
@@ -317,7 +752,7 @@ function SkinViewerComponent() {
                     uuid: username, // Use username as identifier
                     animProgress: Math.random() * 2,
                     animSpeed: 0.87285,
-                    animationState: ANIMATION_STATES.WALK,
+                    animationState: ANIMATION_STATES.WAVE, // Start with wave animation on spawn
                     animationStateTimer: Math.random() * 10 + 5,
                     path: {
                       x: startX,
@@ -327,13 +762,18 @@ function SkinViewerComponent() {
                       targetZ: Math.sin(Math.random() * Math.PI * 2) * (50 + Math.random() * 150),
                       changeTargetTime: Math.random() * 3 + 2
                     },
-                    waveTimer: undefined, // Will be initialized in animation loop
-                    waveDuration: 0,
-                    waveArm: Math.random() > 0.5 ? 'left' : 'right'
+                    waveDuration: 4.0 + Math.random() * 2.0, // Wave for 4-6 seconds on spawn
+                    waveArm: Math.random() > 0.5 ? 'left' : 'right',
+                    // Pathfinding state
+                    lastPosition: { x: startX, z: startZ },
+                    stuckTimer: 0,
+                    stuckThreshold: 2.0, // Consider stuck if not progressing for 2 seconds
+                    pathBlockedCheckTimer: 0
                   }
                   
                   characters.push(characterData)
                   charactersRef.current = characters
+                  setPlayerCount(characters.length) // Update player count
                   console.log(`Added character: ${username}`)
                   resolve()
                 } catch (err) {
@@ -389,6 +829,7 @@ function SkinViewerComponent() {
       // Remove from array
       characters.splice(index, 1)
       charactersRef.current = characters
+      setPlayerCount(characters.length) // Update player count
       console.log(`Removed character: ${username}`)
     }
     
@@ -733,6 +1174,7 @@ function SkinViewerComponent() {
           
           // Update characters ref and render
           charactersRef.current = characters
+          setPlayerCount(characters.length) // Update player count
           console.log(`Created ${characters.length} characters with unique skins`)
           skinViewer.render()
         })
@@ -947,55 +1389,334 @@ function SkinViewerComponent() {
             const group = char.group
             const player = char.player
             
+            // Check if this character is being dragged (used in multiple places)
+            const isBeingDragged = draggedCharRef.current === char && isDraggingRef.current
+            
             // Update animation state timer
             if (!char.animationStateTimer) char.animationStateTimer = Math.random() * 10 + 5
             char.animationStateTimer -= deltaTime
             
-            // Initialize wave timer if not exists (only once)
-            if (char.waveTimer === undefined) {
-              char.waveTimer = Math.random() * 20 + 10 // Random time between 10-30 seconds before first wave
-              char.waveDuration = 0
-              char.waveArm = Math.random() > 0.5 ? 'left' : 'right' // Randomly choose which arm to wave
+            // Initialize wave arm if not exists
+            if (char.waveArm === undefined) {
+              char.waveArm = Math.random() > 0.5 ? 'left' : 'right'
             }
             
-            // Wave state logic
-            if (char.animationState === ANIMATION_STATES.WAVE) {
-              // Currently waving - count down duration
-              char.waveDuration -= deltaTime
-              if (char.waveDuration <= 0) {
-                // Wave finished, return to walking
-                char.animationState = ANIMATION_STATES.WALK
-                char.waveTimer = Math.random() * 25 + 15 // Reset timer for next wave (15-40 seconds)
-                char.waveDuration = 0
+            // Very low chance to decide to hit another player (check every 5 seconds)
+            if (!char.hitTargetPlayer && !char.isHitting && char.animationState !== ANIMATION_STATES.RUN) {
+              if (!char.hitDecisionTimer) {
+                char.hitDecisionTimer = 5.0 // Check every 5 seconds
               }
-            } else {
-              // Not waving - check if it's time to wave
-              char.waveTimer -= deltaTime
-              if (char.waveTimer <= 0) {
-                // Time to wave! (occasionally, not too often)
-                if (Math.random() < 0.4) { // 40% chance when timer expires (increased from 30%)
-                  char.animationState = ANIMATION_STATES.WAVE
-                  char.waveDuration = 4.0 + Math.random() * 2.0 // Wave for 4-6 seconds (longer)
-                  char.waveArm = Math.random() > 0.5 ? 'left' : 'right' // Randomly choose arm
-                } else {
-                  // Reset timer even if we don't wave this time
-                  char.waveTimer = Math.random() * 20 + 10 // Try again in 10-30 seconds
+              char.hitDecisionTimer -= deltaTime
+              if (char.hitDecisionTimer <= 0) {
+                char.hitDecisionTimer = 5.0 // Reset timer
+                // Low chance (0.8% per check = ~1.6% per minute) - slightly increased
+                if (Math.random() < 0.008) {
+                  // Find a nearby player to target
+                  let closestPlayer = null
+                  let closestDist = Infinity
+                  allCharacters.forEach((otherChar, otherIndex) => {
+                    if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                    if (otherChar.animationState === ANIMATION_STATES.RUN) return // Don't target running players
+                    
+                    const otherPath = otherChar.path
+                    const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                    const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                    
+                    const distX = path.x - otherX
+                    const distZ = path.z - otherZ
+                    const dist = Math.sqrt(distX * distX + distZ * distZ)
+                    
+                    // Only target players within reasonable range (50-200 units)
+                    if (dist >= 50 && dist <= 200 && dist < closestDist) {
+                      closestDist = dist
+                      closestPlayer = otherChar
+                    }
+                  })
+                  
+                  if (closestPlayer) {
+                    // Set this player as the target to hit
+                    char.hitTargetPlayer = closestPlayer
+                    // Set path target to walk towards them
+                    const targetPath = closestPlayer.path
+                    const targetX = targetPath.x !== undefined ? targetPath.x : closestPlayer.group.position.x
+                    const targetZ = targetPath.z !== undefined ? targetPath.z : closestPlayer.group.position.z
+                    path.targetX = targetX
+                    path.targetZ = targetZ
+                    path.changeTargetTime = 999 // Don't change target until we hit or give up
+                  }
                 }
-              } else {
-                // Normal walking
-                char.animationState = ANIMATION_STATES.WALK
               }
             }
             
-            // Create a path that moves towards random targets with collision avoidance
+            // If we have a hit target, walk towards them and check if we're close enough to hit
+            if (char.hitTargetPlayer && !char.isHitting) {
+              const targetPath = char.hitTargetPlayer.path
+              const targetX = targetPath.x !== undefined ? targetPath.x : char.hitTargetPlayer.group.position.x
+              const targetZ = targetPath.z !== undefined ? targetPath.z : char.hitTargetPlayer.group.position.z
+              
+              // Update path target to follow the player
+              path.targetX = targetX
+              path.targetZ = targetZ
+              
+              // Check distance to target
+              const distX = path.x - targetX
+              const distZ = path.z - targetZ
+              const dist = Math.sqrt(distX * distX + distZ * distZ)
+              
+              // If VERY close (within 5 units) AND facing the target, hit them!
+              // Check if we're facing the target (within 30 degrees for stricter requirement)
+              const currentRot = group.rotation.y
+              const targetRotation = Math.atan2(distX, distZ)
+              let rotDiff = Math.abs(targetRotation - currentRot)
+              // Normalize to -PI to PI range
+              while (rotDiff > Math.PI) rotDiff -= Math.PI * 2
+              rotDiff = Math.abs(rotDiff)
+              
+              // Only hit if VERY close (within 5 units) AND facing the target (within 30 degrees = PI/6)
+              if (dist < 5 && rotDiff < Math.PI / 6) {
+                // Trigger hit animation
+                char.isHitting = true
+                char.hitAnimationTimer = 0.5 // Hit animation duration
+                
+                // Apply hit to the target character
+                const targetChar = char.hitTargetPlayer
+                targetChar.isBeingHit = true
+                targetChar.hitTimer = 0.6 // Red overlay duration (increased from 0.3)
+                
+                // Apply red overlay to hit character
+                const redTint = { r: 1.5, g: 0.5, b: 0.5 }
+                targetChar.player.traverse((obj) => {
+                  if (obj.material) {
+                    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                    materials.forEach(mat => {
+                      if (mat.color) {
+                        mat.color.r *= redTint.r
+                        mat.color.g *= redTint.g
+                        mat.color.b *= redTint.b
+                        mat.needsUpdate = true
+                      }
+                    })
+                  }
+                })
+                
+                // Apply knockback to hit character (away from hitter) - increased intensity
+                const knockbackDirection = new Vector3(distX / dist, 0, distZ / dist)
+                const knockbackUp = 18 // Increased from 10
+                const knockbackBack = 15 // Increased from 8
+                
+                targetChar.knockbackVelocity = {
+                  x: knockbackDirection.x * knockbackBack,
+                  y: knockbackUp,
+                  z: knockbackDirection.z * knockbackBack
+                }
+                targetChar.gravity = 0.5
+                targetChar.knockbackStartTime = Date.now() // Track when knockback started
+                targetChar.knockbackMinDuration = 0.8 // Minimum knockback duration in seconds
+                
+                // Set up run away for after knockback finishes (don't start running yet)
+                targetChar.runAwayTimer = 6.0 + Math.random() * 4.0 // Run for 6-10 seconds (longer duration)
+                // Run away from hitter, but bias slightly towards center (0, 0)
+                const runAwayX = targetX - knockbackDirection.x * 180 // Increased from 100 to 180 units
+                const runAwayZ = targetZ - knockbackDirection.z * 180 // Increased from 100 to 180 units
+                // Bias towards center: blend 90% away direction, 10% center direction
+                const centerBias = 0.1
+                targetChar.runAwayTarget = {
+                  x: runAwayX * (1 - centerBias) + 0 * centerBias, // Slight bias towards center (x=0)
+                  z: runAwayZ * (1 - centerBias) + 0 * centerBias  // Slight bias towards center (z=0)
+                }
+                targetChar.runAwayFrom = char // Remember who to run from
+                targetChar.shouldRunAway = true // Flag to start running after knockback finishes
+                // Don't set animation state to RUN yet - wait for knockback to finish
+                targetChar.wasHitByPlayer = true // Mark that this was a player-to-player hit
+                
+                // Clear hit target - we've hit them
+                char.hitTargetPlayer = null
+                path.changeTargetTime = 0 // Allow new target selection
+              } else if (dist > 250) {
+                // Target got too far away, give up
+                char.hitTargetPlayer = null
+                path.changeTargetTime = 0 // Allow new target selection
+              }
+            }
+            
+            // Handle hit animation timer (when character is hitting another)
+            // Hit animation should play once, then return to walking
+            if (char.isHitting && char.hitAnimationTimer !== undefined) {
+              char.hitAnimationTimer -= deltaTime
+              if (char.hitAnimationTimer <= 0) {
+                // Hit animation complete - return to walking
+                char.isHitting = false
+                char.hitAnimationTimer = undefined
+                char.animationState = ANIMATION_STATES.WALK
+                char.animProgress = 0 // Reset animation progress
+              }
+            }
+            
+            // Handle run away timer (when character is running away after being hit)
+            if (char.runAwayTimer !== undefined && char.runAwayTimer > 0) {
+              char.runAwayTimer -= deltaTime
+              
+              // Update run away target to keep running from the hitter
+              if (char.runAwayFrom && char.runAwayFrom.path) {
+                const hitterX = char.runAwayFrom.path.x
+                const hitterZ = char.runAwayFrom.path.z
+                const runAwayDirX = path.x - hitterX
+                const runAwayDirZ = path.z - hitterZ
+                const runAwayDist = Math.sqrt(runAwayDirX * runAwayDirX + runAwayDirZ * runAwayDirZ)
+                
+                if (runAwayDist > 0) {
+                  // Keep running away from the hitter, but bias slightly towards center
+                  const pureRunAwayX = path.x + (runAwayDirX / runAwayDist) * 180 // Increased from 100 to 180 units
+                  const pureRunAwayZ = path.z + (runAwayDirZ / runAwayDist) * 180 // Increased from 100 to 180 units
+                  // Bias towards center: blend 90% away direction, 10% center direction
+                  const centerBias = 0.1
+                  char.runAwayTarget = {
+                    x: pureRunAwayX * (1 - centerBias) + 0 * centerBias, // Slight bias towards center (x=0)
+                    z: pureRunAwayZ * (1 - centerBias) + 0 * centerBias  // Slight bias towards center (z=0)
+                  }
+                }
+              }
+              
+              if (char.runAwayTimer <= 0) {
+                // Stop running, return to walking
+                char.animationState = ANIMATION_STATES.WALK
+                char.runAwayTimer = undefined
+                char.runAwayTarget = null
+                char.runAwayFrom = null
+              }
+            }
+            
+            // Don't change animation state if being dragged (keep idle) or hitting
+            if (!isBeingDragged && !char.isHitting) {
+              // Wave state logic - only wave on spawn or when hit by user
+              if (char.animationState === ANIMATION_STATES.WAVE) {
+                // Currently waving - count down duration
+                if (char.waveDuration !== undefined && char.waveDuration > 0) {
+                  char.waveDuration -= deltaTime
+                  if (char.waveDuration <= 0) {
+                    // Wave finished, return to walking
+                    char.animationState = ANIMATION_STATES.WALK
+                    char.waveDuration = undefined
+                  }
+                } else if (char.waveDuration === undefined) {
+                  // No duration set, return to walking
+                  char.animationState = ANIMATION_STATES.WALK
+                }
+              } else if (char.animationState === ANIMATION_STATES.RUN) {
+                // Running away - handled by runAwayTimer above
+                // Don't change state here - only used when running away after being hit
+              } else if (char.animationState === ANIMATION_STATES.IDLE) {
+                // Idle state - handled by idleDuration above
+                // Don't change state here
+              } else {
+                // Normal walking (only if not hitting and not running)
+                if (char.animationState !== ANIMATION_STATES.RUN) {
+                  char.animationState = ANIMATION_STATES.WALK
+                }
+              }
+            }
+            
+            // Create a path that moves towards random targets, preferring less crowded areas
             // Each character walks towards a target, then picks a new one
+            // Keep targets within screen bounds and ensure good distances
+            const maxTargetDistance = 450 // Keep targets within screen bounds (increased to allow further paths)
+            const minTargetDistance = 120 // Minimum distance from current position (ensures considerable movement)
             if (!path.changeTargetTime) {
-              path.changeTargetTime = Math.random() * 3 + 2 // Change targets more frequently (2-5 seconds)
-              // Use uniform distribution in a circle to avoid center bias
-              const angle = Math.random() * Math.PI * 2
-              const radius = 50 + Math.random() * 150 // Between 50 and 200 units from center
-              path.targetX = Math.cos(angle) * radius
-              path.targetZ = Math.sin(angle) * radius
+              path.changeTargetTime = Math.random() * 5 + 4 // Change targets every 4-9 seconds (longer paths)
+              
+              // Try to find a less crowded area for the target, prioritizing areas with LEAST users
+              const densityRadius = 120 // Increased radius to better detect crowded areas
+              const candidates = []
+              
+              // Sample many potential targets across the entire screen area
+              // Bias towards further distances to spread characters out
+              for (let attempt = 0; attempt < 25; attempt++) {
+                const angle = Math.random() * Math.PI * 2
+                // Bias towards further distances: 60% chance to be in outer half, 40% in inner half
+                const distanceBias = Math.random() < 0.6 ? 0.5 : 0.0
+                const radius = (maxTargetDistance * 0.3) + Math.random() * (maxTargetDistance * (0.7 + distanceBias)) // Between 30% and 100% of max distance
+                const candidateX = Math.cos(angle) * radius
+                const candidateZ = Math.sin(angle) * radius
+                
+                // Ensure candidate is a good distance from current position
+                const distToCandidate = Math.sqrt((candidateX - path.x) ** 2 + (candidateZ - path.z) ** 2)
+                if (distToCandidate < minTargetDistance) continue
+                
+                // Calculate density at candidate location (including other characters' targets to avoid clustering)
+                let candidateDensity = 0
+                allCharacters.forEach((otherChar, otherIndex) => {
+                  if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                  
+                  const otherPath = otherChar.path
+                  const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                  const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                  
+                  // Check distance to other character's position
+                  const distToOther = Math.sqrt((candidateX - otherX) ** 2 + (candidateZ - otherZ) ** 2)
+                  if (distToOther < densityRadius && distToOther > 0) {
+                    candidateDensity += (densityRadius - distToOther) / densityRadius
+                  }
+                  
+                  // STRONGLY avoid other characters' targets - no two characters should path to the same area
+                  if (otherPath.targetX !== undefined && otherPath.targetZ !== undefined) {
+                    const distToTarget = Math.sqrt((candidateX - otherPath.targetX) ** 2 + (candidateZ - otherPath.targetZ) ** 2)
+                    const targetAvoidRadius = 100 // Large radius to avoid other targets
+                    if (distToTarget < targetAvoidRadius && distToTarget > 0) {
+                      // Heavy penalty - make it very undesirable to path near other targets
+                      const penalty = (targetAvoidRadius - distToTarget) / targetAvoidRadius
+                      candidateDensity += penalty * 3.0 // Strong penalty (3x weight)
+                    }
+                  }
+                })
+                
+                // Prefer not to path to bottom of screen (negative Z values) - add small penalty
+                // Bottom of screen is typically negative Z in this coordinate system
+                let bottomPenalty = 0
+                if (candidateZ < 0) {
+                  // Add penalty based on how far down (more negative = more penalty)
+                  // Normalize: -maxDistance to 0 becomes 0 to 1 penalty
+                  const normalizedBottom = Math.abs(candidateZ) / maxTargetDistance
+                  bottomPenalty = normalizedBottom * 2.0 // Up to 200% density penalty for bottom area (much stronger bias)
+                }
+                
+                // Add some randomness to prevent all characters choosing the exact same spot
+                const randomNoise = Math.random() * 0.2 // Reduced randomness (0-20%) since we have strong target avoidance
+                candidates.push({
+                  x: candidateX,
+                  z: candidateZ,
+                  density: (candidateDensity + bottomPenalty) * (1 + randomNoise) // Add randomness to density score
+                })
+              }
+              
+              // Sort by density and pick from the top 20% LOWEST density (most empty areas)
+              // This ensures characters path to the least crowded areas
+              candidates.sort((a, b) => a.density - b.density)
+              const topCandidates = candidates.slice(0, Math.max(1, Math.floor(candidates.length * 0.2))) // Top 20% lowest density
+              // Prefer candidates further from center AND further from current position if density is similar (within 10% of each other)
+              const lowestDensity = topCandidates[0].density
+              const densityThreshold = lowestDensity * 1.1
+              const bestCandidates = topCandidates.filter(c => c.density <= densityThreshold)
+              // Among best candidates, prefer those further from current position AND further from center
+              bestCandidates.forEach(c => {
+                // Calculate distance from current position for scoring
+                const distFromCurrent = Math.sqrt((c.x - path.x) ** 2 + (c.z - path.z) ** 2)
+                const distFromCenter = Math.sqrt(c.x ** 2 + c.z ** 2)
+                // Combined score: prioritize distance from current position (70%) and distance from center (30%)
+                c.combinedDistance = distFromCurrent * 0.7 + distFromCenter * 0.3
+              })
+              bestCandidates.sort((a, b) => b.combinedDistance - a.combinedDistance) // Furthest combined distance first
+              const selectedCandidate = bestCandidates[0] || topCandidates[0] // Pick the furthest among best, or fallback to first
+              
+              if (selectedCandidate) {
+                path.targetX = selectedCandidate.x
+                path.targetZ = selectedCandidate.z
+              } else {
+                // Fallback to random target (further from center)
+                const angle = Math.random() * Math.PI * 2
+                const radius = (maxTargetDistance * 0.5) + Math.random() * (maxTargetDistance * 0.5) // Outer 50% of range
+                path.targetX = Math.cos(angle) * radius
+                path.targetZ = Math.sin(angle) * radius
+              }
             }
             
             // Move towards target - calculate distance first
@@ -1003,101 +1724,476 @@ function SkinViewerComponent() {
             let dz = path.targetZ - path.z
             let distance = Math.sqrt(dx * dx + dz * dz)
             
-            // Check if it's time to change target - more frequent changes
-            path.changeTargetTime -= deltaTime
-            if (path.changeTargetTime <= 0 || distance < 15) {
-              // Use uniform distribution in a circle to avoid center bias
-              // Generate angle and radius for better distribution
-              const angle = Math.random() * Math.PI * 2
-              const radius = 50 + Math.random() * 150 // Between 50 and 200 units from center
-              const newTargetX = Math.cos(angle) * radius
-              const newTargetZ = Math.sin(angle) * radius
-              
-              // Ensure new target is far enough away from current position
-              const newDist = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
-              if (newDist >= 30) {
-                path.targetX = newTargetX
-                path.targetZ = newTargetZ
+            // Idle behavior - idle when reaching target, then path somewhere else
+            // Check if character has reached their target
+            const reachedTarget = distance < 10 // Consider reached when within 10 units
+            
+            // Handle idle state - characters stand still when idling
+            if (char.animationState === ANIMATION_STATES.IDLE) {
+              if (char.idleDuration !== undefined) {
+                char.idleDuration -= deltaTime
+                if (char.idleDuration <= 0) {
+                  // Idle finished, return to walking and pick new target
+                  char.animationState = ANIMATION_STATES.WALK
+                  char.idleDuration = undefined
+                  path.changeTargetTime = 0 // Force new target selection
+                }
               } else {
-                // If too close, try again with a different angle
-                const retryAngle = Math.random() * Math.PI * 2
-                path.targetX = Math.cos(retryAngle) * radius
-                path.targetZ = Math.sin(retryAngle) * radius
+                // No duration set, return to walking
+                char.animationState = ANIMATION_STATES.WALK
+                path.changeTargetTime = 0 // Force new target selection
+              }
+            } else if (reachedTarget && char.animationState === ANIMATION_STATES.WALK && !char.hitTargetPlayer && !char.waypoint) {
+              // Reached target - enter idle animation
+              char.animationState = ANIMATION_STATES.IDLE
+              char.idleDuration = 2.0 + Math.random() * 3.0 // Idle for 2-5 seconds (random)
+            }
+            
+            // Track progress to detect if stuck
+            const distToTarget = distance
+            if (!char.lastDistanceToTarget) {
+              char.lastDistanceToTarget = distToTarget
+              char.stuckTimer = 0
+            }
+            
+            // Check if making progress towards target
+            const progressMade = char.lastDistanceToTarget - distToTarget
+            if (progressMade < 0.5 && distToTarget > 10) { // Not making progress and still far from target
+              char.stuckTimer += deltaTime
+            } else {
+              char.stuckTimer = 0 // Reset if making progress
+              char.lastDistanceToTarget = distToTarget
+            }
+            
+            // Check if path is blocked by obstacles
+            char.pathBlockedCheckTimer = (char.pathBlockedCheckTimer || 0) + deltaTime
+            let isPathBlocked = false
+            if (char.pathBlockedCheckTimer > 0.5 && distToTarget > 15) { // Check every 0.5 seconds
+              char.pathBlockedCheckTimer = 0
+              
+              // Sample points along the path to target to check for obstacles
+              const pathCheckPoints = 5
+              const stepSize = distToTarget / pathCheckPoints
+              const dirX = dx / distToTarget
+              const dirZ = dz / distToTarget
+              
+              let blockedCount = 0
+              for (let i = 1; i <= pathCheckPoints; i++) {
+                const checkX = path.x + dirX * stepSize * i
+                const checkZ = path.z + dirZ * stepSize * i
+                const checkRadius = 40 // Check radius for obstacles
+                
+                // Check if any character is blocking this point
+                allCharacters.forEach((otherChar, otherIndex) => {
+                  if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                  
+                  const otherPath = otherChar.path
+                  const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                  const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                  
+                  const distToCheck = Math.sqrt((checkX - otherX) ** 2 + (checkZ - otherZ) ** 2)
+                  if (distToCheck < checkRadius) {
+                    blockedCount++
+                  }
+                })
               }
               
-              path.changeTargetTime = Math.random() * 3 + 2 // Change targets more frequently (2-5 seconds)
+              // If more than 30% of path is blocked, consider it blocked
+              isPathBlocked = blockedCount > pathCheckPoints * 0.3
+            }
+            
+            // If stuck or path blocked, find alternative path
+            if ((char.stuckTimer > char.stuckThreshold || isPathBlocked) && !char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE) {
+              // Try to find a path around obstacles using steering
+              const steeringRadius = 80 // How far to look for alternative paths
+              const steeringAngles = []
+              
+              // Sample angles around the target direction
+              const targetAngle = Math.atan2(dx, dz)
+              for (let i = -3; i <= 3; i++) {
+                steeringAngles.push(targetAngle + (i * Math.PI / 6)) // ±90 degrees in 30-degree steps
+              }
+              
+              let bestSteerAngle = null
+              let bestSteerScore = Infinity
+              
+              steeringAngles.forEach(angle => {
+                const steerX = path.x + Math.cos(angle) * steeringRadius
+                const steerZ = path.z + Math.sin(angle) * steeringRadius
+                
+                // Check if this steering direction avoids obstacles
+                let obstacleCount = 0
+                let totalDistToTarget = 0
+                
+                allCharacters.forEach((otherChar, otherIndex) => {
+                  if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                  
+                  const otherPath = otherChar.path
+                  const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                  const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                  
+                  const distToOther = Math.sqrt((steerX - otherX) ** 2 + (steerZ - otherZ) ** 2)
+                  if (distToOther < 50) {
+                    obstacleCount++
+                  }
+                  
+                  // Also check distance to other targets
+                  if (otherPath.targetX !== undefined && otherPath.targetZ !== undefined) {
+                    const distToOtherTarget = Math.sqrt((steerX - otherPath.targetX) ** 2 + (steerZ - otherPath.targetZ) ** 2)
+                    if (distToOtherTarget < 80) {
+                      obstacleCount += 0.5
+                    }
+                  }
+                })
+                
+                // Calculate distance from steer point to target
+                const distFromSteerToTarget = Math.sqrt((steerX - path.targetX) ** 2 + (steerZ - path.targetZ) ** 2)
+                
+                // Score: lower is better (fewer obstacles, closer to target)
+                const score = obstacleCount * 10 + distFromSteerToTarget * 0.1
+                
+                if (score < bestSteerScore) {
+                  bestSteerScore = score
+                  bestSteerAngle = angle
+                }
+              })
+              
+              // If we found a good steering angle, set intermediate waypoint
+              if (bestSteerAngle !== null && bestSteerScore < 50) {
+                const waypointX = path.x + Math.cos(bestSteerAngle) * steeringRadius
+                const waypointZ = path.z + Math.sin(bestSteerAngle) * steeringRadius
+                
+                // Clamp to screen bounds
+                const waypointDist = Math.sqrt(waypointX ** 2 + waypointZ ** 2)
+                if (waypointDist < maxTargetDistance) {
+                  // Set intermediate waypoint (will path to this first, then continue to target)
+                  if (!char.waypoint) {
+                    char.waypoint = { x: waypointX, z: waypointZ }
+                  } else {
+                    // Update waypoint if we have a better one
+                    char.waypoint.x = waypointX
+                    char.waypoint.z = waypointZ
+                  }
+                  
+                  // Reset stuck timer
+                  char.stuckTimer = 0
+                  char.lastDistanceToTarget = distToTarget
+                }
+              } else {
+                // If no good steering found, pick completely new target
+                path.changeTargetTime = 0 // Force new target selection
+                char.stuckTimer = 0
+                char.lastDistanceToTarget = undefined
+              }
+            }
+            
+            // Use waypoint if available (pathfinding around obstacles)
+            if (char.waypoint) {
+              const waypointDx = char.waypoint.x - path.x
+              const waypointDz = char.waypoint.z - path.z
+              const waypointDist = Math.sqrt(waypointDx * waypointDx + waypointDz * waypointDz)
+              
+              if (waypointDist < 20) {
+                // Reached waypoint, clear it and continue to target
+                char.waypoint = null
+              } else {
+                // Path to waypoint instead of direct target
+                dx = waypointDx
+                dz = waypointDz
+                distance = waypointDist
+              }
+            }
+            
+            // Check if it's time to change target
+            // Don't change target if we're walking towards a hit target or idling
+            // Don't change target while idling - wait for idle to finish
+            if (!char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE) {
+              path.changeTargetTime -= deltaTime
+            }
+            // Only change target if not idling (idle will trigger new target when it finishes)
+            if ((path.changeTargetTime <= 0 || distance < 5) && !char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE) {
+              // Try to find a less crowded area for the new target, with randomness to prevent clustering
+              // Prioritize areas with the LEAST users surrounding them
+              const densityRadius = 120 // Increased radius to better detect crowded areas
+              const candidates = []
+              
+              // Sample many potential targets across the entire screen area
+              // Bias towards further distances to spread characters out
+              for (let attempt = 0; attempt < 25; attempt++) {
+                const angle = Math.random() * Math.PI * 2
+                // Bias towards further distances: 60% chance to be in outer half, 40% in inner half
+                const distanceBias = Math.random() < 0.6 ? 0.5 : 0.0
+                const radius = (maxTargetDistance * 0.3) + Math.random() * (maxTargetDistance * (0.7 + distanceBias)) // Between 30% and 100% of max distance
+                const candidateX = Math.cos(angle) * radius
+                const candidateZ = Math.sin(angle) * radius
+                
+                // Ensure candidate is a good distance from current position
+                const distToCandidate = Math.sqrt((candidateX - path.x) ** 2 + (candidateZ - path.z) ** 2)
+                if (distToCandidate < minTargetDistance) continue
+                
+                // Calculate density at candidate location (including other characters' targets to avoid clustering)
+                let candidateDensity = 0
+                allCharacters.forEach((otherChar, otherIndex) => {
+                  if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                  
+                  const otherPath = otherChar.path
+                  const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                  const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                  
+                  // Check distance to other character's position
+                  const distToOther = Math.sqrt((candidateX - otherX) ** 2 + (candidateZ - otherZ) ** 2)
+                  if (distToOther < densityRadius && distToOther > 0) {
+                    candidateDensity += (densityRadius - distToOther) / densityRadius
+                  }
+                  
+                  // STRONGLY avoid other characters' targets - no two characters should path to the same area
+                  if (otherPath.targetX !== undefined && otherPath.targetZ !== undefined) {
+                    const distToTarget = Math.sqrt((candidateX - otherPath.targetX) ** 2 + (candidateZ - otherPath.targetZ) ** 2)
+                    const targetAvoidRadius = 100 // Large radius to avoid other targets
+                    if (distToTarget < targetAvoidRadius && distToTarget > 0) {
+                      // Heavy penalty - make it very undesirable to path near other targets
+                      const penalty = (targetAvoidRadius - distToTarget) / targetAvoidRadius
+                      candidateDensity += penalty * 3.0 // Strong penalty (3x weight)
+                    }
+                  }
+                })
+                
+                // Prefer not to path to bottom of screen (negative Z values) - add small penalty
+                // Bottom of screen is typically negative Z in this coordinate system
+                let bottomPenalty = 0
+                if (candidateZ < 0) {
+                  // Add penalty based on how far down (more negative = more penalty)
+                  // Normalize: -maxDistance to 0 becomes 0 to 1 penalty
+                  const normalizedBottom = Math.abs(candidateZ) / maxTargetDistance
+                  bottomPenalty = normalizedBottom * 2.0 // Up to 200% density penalty for bottom area (much stronger bias)
+                }
+                
+                // Add randomness to prevent all characters choosing the exact same spot
+                const randomNoise = Math.random() * 0.2 // Reduced randomness (0-20%) since we have strong target avoidance
+                candidates.push({
+                  x: candidateX,
+                  z: candidateZ,
+                  density: (candidateDensity + bottomPenalty) * (1 + randomNoise) // Add randomness to density score
+                })
+              }
+              
+              // Sort by density and pick from the top 20% LOWEST density (most empty areas)
+              // This ensures characters path to the least crowded areas
+              candidates.sort((a, b) => a.density - b.density)
+              const topCandidates = candidates.slice(0, Math.max(1, Math.floor(candidates.length * 0.2))) // Top 20% lowest density
+              // Prefer candidates further from current position AND further from center if density is similar (within 10% of each other)
+              const lowestDensity = topCandidates[0].density
+              const densityThreshold = lowestDensity * 1.1
+              const bestCandidates = topCandidates.filter(c => c.density <= densityThreshold)
+              // Among best candidates, prefer those further from current position AND further from center
+              bestCandidates.forEach(c => {
+                // Calculate distance from current position for scoring
+                const distFromCurrent = Math.sqrt((c.x - path.x) ** 2 + (c.z - path.z) ** 2)
+                const distFromCenter = Math.sqrt(c.x ** 2 + c.z ** 2)
+                // Combined score: prioritize distance from current position (70%) and distance from center (30%)
+                c.combinedDistance = distFromCurrent * 0.7 + distFromCenter * 0.3
+              })
+              bestCandidates.sort((a, b) => b.combinedDistance - a.combinedDistance) // Furthest combined distance first
+              const selectedCandidate = bestCandidates[0] || topCandidates[0] // Pick the furthest among best, or fallback to first
+              
+              if (selectedCandidate) {
+                path.targetX = selectedCandidate.x
+                path.targetZ = selectedCandidate.z
+              } else {
+                // Fallback: pick one relative to current position (considerable distance away)
+                const angle = Math.random() * Math.PI * 2
+                path.targetX = path.x + Math.cos(angle) * minTargetDistance
+                path.targetZ = path.z + Math.sin(angle) * minTargetDistance
+                // Clamp to screen bounds
+                const distFromCenter = Math.sqrt(path.targetX ** 2 + path.targetZ ** 2)
+                if (distFromCenter > maxTargetDistance) {
+                  const scale = maxTargetDistance / distFromCenter
+                  path.targetX *= scale
+                  path.targetZ *= scale
+                }
+              }
+              
+              path.changeTargetTime = Math.random() * 5 + 4 // Change targets every 4-9 seconds (longer paths)
               // Recalculate dx, dz, and distance after changing target
               dx = path.targetX - path.x
               dz = path.targetZ - path.z
               distance = Math.sqrt(dx * dx + dz * dz)
             }
             
-            // Collision avoidance - prevent clumping but allow natural movement
-            const avoidanceRadius = 80 // Start avoiding from 80 units away (reduced from 120)
-            const minDistance = 50 // Minimum distance of 50 units (reduced from 80)
+            // Density-based pathing - prefer areas with fewer people
+            // Skip collision avoidance entirely when targeting a player to hit (path directly)
             let avoidX = 0
             let avoidZ = 0
             
-            // Center repulsion - gentle push away from center
+            // Screen bounds - keep characters visible (camera is 500 units away, keep within ~450 units from center)
+            const maxDistanceFromCenter = 450
             const centerDist = Math.sqrt(path.x ** 2 + path.z ** 2)
-            const centerRepulsionRadius = 60 // Start repelling from center when within 60 units (reduced)
-            if (centerDist < centerRepulsionRadius && centerDist > 0) {
-              const centerRepulsionStrength = (centerRepulsionRadius - centerDist) / centerRepulsionRadius
-              avoidX += (path.x / centerDist) * centerRepulsionStrength * 5 // Gentle push (reduced from 12)
-              avoidZ += (path.z / centerDist) * centerRepulsionStrength * 5
+            if (centerDist > maxDistanceFromCenter) {
+              // Gently push back towards center (only when at edge)
+              const pushStrength = (centerDist - maxDistanceFromCenter) / 50
+              avoidX -= (path.x / centerDist) * pushStrength * 1.0
+              avoidZ -= (path.z / centerDist) * pushStrength * 1.0
             }
             
-            // Second priority: Avoid other characters (gentler to allow natural movement)
-            allCharacters.forEach((otherChar, otherIndex) => {
-              if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+            // Only do collision avoidance and density checking if NOT targeting a player to hit
+            if (!char.hitTargetPlayer) {
+              const avoidanceRadius = 30 // Only avoid when very close
+              const minDistance = 25 // Minimum distance before forcing target change
               
-              const otherPath = otherChar.path
-              const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
-              const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+              // Calculate local density (how many characters are nearby)
+              const densityRadius = 80 // Check density in 80 unit radius
+              let localDensity = 0
               
-              const distX = path.x - otherX
-              const distZ = path.z - otherZ
-              const dist = Math.sqrt(distX * distX + distZ * distZ)
-              
-              // Gentle avoidance when close to other characters
-              if (dist < avoidanceRadius && dist > 0) {
-                const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
-                // Moderate avoidance force - allows natural movement (reduced from 10)
-                avoidX += (distX / dist) * avoidStrength * 4
-                avoidZ += (distZ / dist) * avoidStrength * 4
+              allCharacters.forEach((otherChar, otherIndex) => {
+                if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
                 
-                // If very close, override target to move away (but less aggressively)
-                if (dist < minDistance) {
-                  // Calculate escape direction (away from other character)
-                  const escapeDist = 60 // Move 60 units away (reduced from 100)
-                  const newTargetX = path.x + (distX / dist) * escapeDist
-                  const newTargetZ = path.z + (distZ / dist) * escapeDist
+                const otherPath = otherChar.path
+                const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                
+                const distX = path.x - otherX
+                const distZ = path.z - otherZ
+                const dist = Math.sqrt(distX * distX + distZ * distZ)
+                
+                // Count nearby characters for density calculation
+                if (dist < densityRadius && dist > 0) {
+                  localDensity += (densityRadius - dist) / densityRadius // Weight by distance
+                }
+                
+                // Only avoid when very close - prevent stacking but don't cause jiggling
+                if (dist < avoidanceRadius && dist > 0) {
+                  const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
+                  // Very minimal avoidance force - just enough to prevent stacking
+                  avoidX += (distX / dist) * avoidStrength * 0.5
+                  avoidZ += (distZ / dist) * avoidStrength * 0.5
                   
-                  // Only update if new target is far enough from current position
-                  const newTargetDist = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
-                  if (newTargetDist >= 30) {
-                    path.targetX = newTargetX
-                    path.targetZ = newTargetZ
-                    path.changeTargetTime = 1.0 // Change target less aggressively (increased from 0.5)
+                  // Only override target if extremely close (prevent actual collision)
+                  // BUT: Don't override if we're very close to our goal (< 15 units) - prioritize reaching destination
+                  if (dist < minDistance && char.animationState !== ANIMATION_STATES.RUN && distance > 15) {
+                    // Calculate escape direction (away from other character)
+                    // Make sure escape target is a good distance away
+                    const escapeDist = 80 // Move 80 units away (good distance)
+                    const newTargetX = path.x + (distX / dist) * escapeDist
+                    const newTargetZ = path.z + (distZ / dist) * escapeDist
                     
-                    // Also update dx/dz to reflect new target
-                    dx = path.targetX - path.x
-                    dz = path.targetZ - path.z
-                    distance = Math.sqrt(dx * dx + dz * dz)
+                    // Check if new target is within screen bounds
+                    const newTargetDist = Math.sqrt(newTargetX ** 2 + newTargetZ ** 2)
+                    if (newTargetDist < maxTargetDistance) {
+                      // Only change target if it's far enough from current position
+                      const distToNewTarget = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
+                      if (distToNewTarget >= 50) { // Ensure we're moving a good distance
+                        path.targetX = newTargetX
+                        path.targetZ = newTargetZ
+                        path.changeTargetTime = 0.3 // Quick reaction to avoid collision
+                        
+                        // Also update dx/dz to reflect new target
+                        dx = path.targetX - path.x
+                        dz = path.targetZ - path.z
+                        distance = Math.sqrt(dx * dx + dz * dz)
+                      }
+                    }
+                  }
+                }
+              })
+              
+              // If in a crowded area, prefer moving towards less crowded areas
+              // But add randomness and avoid other characters' targets to prevent clustering
+              if (localDensity > 2.5 && path.changeTargetTime < 1.5) { // Only when very crowded and close to changing target
+                const sampleRadius = 100 // Sample density at this distance
+                const sampleAngles = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, 5 * Math.PI / 4, 3 * Math.PI / 2, 7 * Math.PI / 4] // 8 directions
+                const candidates = []
+                
+                sampleAngles.forEach(angle => {
+                  const sampleX = path.x + Math.cos(angle) * sampleRadius
+                  const sampleZ = path.z + Math.sin(angle) * sampleRadius
+                  
+                  // Check if sample point is within bounds
+                  const sampleDistFromCenter = Math.sqrt(sampleX ** 2 + sampleZ ** 2)
+                  if (sampleDistFromCenter < maxTargetDistance) {
+                    // Calculate density at this sample point (including other targets)
+                    let sampleDensity = 0
+                    allCharacters.forEach((otherChar, otherIndex) => {
+                      if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                      
+                      const otherPath = otherChar.path
+                      const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                      const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                      
+                      // Check distance to other character
+                      const distToOther = Math.sqrt((sampleX - otherX) ** 2 + (sampleZ - otherZ) ** 2)
+                      if (distToOther < densityRadius && distToOther > 0) {
+                        sampleDensity += (densityRadius - distToOther) / densityRadius
+                      }
+                      
+                      // STRONGLY avoid other characters' targets - no two characters should path to the same area
+                      if (otherPath.targetX !== undefined && otherPath.targetZ !== undefined) {
+                        const distToTarget = Math.sqrt((sampleX - otherPath.targetX) ** 2 + (sampleZ - otherPath.targetZ) ** 2)
+                        const targetAvoidRadius = 100 // Large radius to avoid other targets
+                        if (distToTarget < targetAvoidRadius && distToTarget > 0) {
+                          // Heavy penalty - make it very undesirable to path near other targets
+                          const penalty = (targetAvoidRadius - distToTarget) / targetAvoidRadius
+                          sampleDensity += penalty * 3.0 // Strong penalty (3x weight)
+                        }
+                      }
+                    })
+                    
+                    // Add randomness
+                    const randomNoise = Math.random() * 0.2
+                    candidates.push({
+                      angle: angle,
+                      density: sampleDensity * (1 + randomNoise)
+                    })
+                  }
+                })
+                
+                // Sort by density and pick from top 40% with randomness
+                if (candidates.length > 0) {
+                  candidates.sort((a, b) => a.density - b.density)
+                  const topCandidates = candidates.slice(0, Math.max(1, Math.floor(candidates.length * 0.4)))
+                  const selected = topCandidates[Math.floor(Math.random() * topCandidates.length)]
+                  
+                  if (selected && selected.density < localDensity * 0.8) {
+                    const newTargetX = path.x + Math.cos(selected.angle) * sampleRadius
+                    const newTargetZ = path.z + Math.sin(selected.angle) * sampleRadius
+                    
+                    // Ensure new target is within bounds and far enough
+                    const newTargetDist = Math.sqrt(newTargetX ** 2 + newTargetZ ** 2)
+                    if (newTargetDist < maxTargetDistance) {
+                      const distToNewTarget = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
+                      if (distToNewTarget >= 50) {
+                        path.targetX = newTargetX
+                        path.targetZ = newTargetZ
+                        path.changeTargetTime = 0.5 // Quick adjustment towards less crowded area
+                        
+                        // Also update dx/dz to reflect new target
+                        dx = path.targetX - path.x
+                        dz = path.targetZ - path.z
+                        distance = Math.sqrt(dx * dx + dz * dz)
+                      }
+                    }
                   }
                 }
               }
-            })
+            }
             
-            const moveSpeed = baseMoveSpeed
+            // Increase speed by 10% when seeking a hit target
+            // Reduce walk speed by 15% unless running or seeking a target
+            let moveSpeed = baseMoveSpeed
+            if (char.hitTargetPlayer) {
+              moveSpeed = baseMoveSpeed * 1.1 // 10% faster when seeking target
+            } else if (char.animationState !== ANIMATION_STATES.RUN) {
+              moveSpeed = baseMoveSpeed * 0.85 // 15% slower for normal walking
+            } else {
+              moveSpeed = baseMoveSpeed // Keep normal speed when running
+            }
             
             // Update character position in 3D space
             // Move in a path that goes away from camera
             path.angle += moveSpeed * 0.15
             
-            // Normal movement towards target - don't reduce it
-            const moveX = (dx / Math.max(distance, 0.1)) * moveSpeed + avoidX * 0.5
-            const moveZ = (dz / Math.max(distance, 0.1)) * moveSpeed + avoidZ * 0.5
+            // Normal movement towards target - minimal avoidance influence (just enough to prevent stacking)
+            const moveX = (dx / Math.max(distance, 0.1)) * moveSpeed + avoidX * 0.2
+            const moveZ = (dz / Math.max(distance, 0.1)) * moveSpeed + avoidZ * 0.2
             
             // Calculate movement direction for rotation BEFORE moving
             // Use the intended movement direction, not the actual movement
@@ -1105,9 +2201,40 @@ function SkinViewerComponent() {
             const totalMoveZ = moveZ
             const moveDistance = Math.sqrt(totalMoveX * totalMoveX + totalMoveZ * totalMoveZ)
             
-            // Rotate to face movement direction or camera (if waving)
-            if (char.animationState === ANIMATION_STATES.WAVE) {
-              // Face camera when waving - camera is at 45 degree angle looking down
+            // Rotate to face movement direction or camera (if waving or idle/dragged)
+            // Priority: Hit target > Wave/Idle > Run away > Normal movement
+            if (char.hitTargetPlayer && !char.isHitting) {
+              // Face the hit target when seeking them
+              const targetPath = char.hitTargetPlayer.path
+              const targetX = targetPath.x !== undefined ? targetPath.x : char.hitTargetPlayer.group.position.x
+              const targetZ = targetPath.z !== undefined ? targetPath.z : char.hitTargetPlayer.group.position.z
+              
+              const targetDirX = targetX - path.x
+              const targetDirZ = targetZ - path.z
+              const targetDist = Math.sqrt(targetDirX * targetDirX + targetDirZ * targetDirZ)
+              
+              if (targetDist > 0.001) {
+                const targetRotation = Math.atan2(targetDirX, targetDirZ)
+                let currentRot = group.rotation.y
+                
+                // Normalize angles
+                while (currentRot > Math.PI) currentRot -= Math.PI * 2
+                while (currentRot < -Math.PI) currentRot += Math.PI * 2
+                
+                let targetRot = targetRotation
+                while (targetRot > Math.PI) targetRot -= Math.PI * 2
+                while (targetRot < -Math.PI) targetRot += Math.PI * 2
+                
+                let diff = targetRot - currentRot
+                if (diff > Math.PI) diff -= Math.PI * 2
+                if (diff < -Math.PI) diff += Math.PI * 2
+                
+                // Fast rotation to face target (faster when close)
+                const rotationSpeed = targetDist < 20 ? 0.5 : 0.3 // Faster rotation when close
+                group.rotation.y += diff * rotationSpeed
+              }
+            } else if (char.animationState === ANIMATION_STATES.WAVE || char.animationState === ANIMATION_STATES.IDLE) {
+              // Face camera when waving or idle (being dragged) - camera is at 45 degree angle looking down
               // Camera position: (sin(45)*500, cos(45)*500, cos(45)*500)
               // Character needs to face towards camera position from origin
               // Rotation angle in XZ plane: atan2(cameraX, cameraZ) = atan2(sin(45), cos(45)) = PI/4
@@ -1130,6 +2257,32 @@ function SkinViewerComponent() {
               // Smooth rotation to face camera (faster rotation)
               const rotationSpeed = 0.2
               group.rotation.y += diff * rotationSpeed
+            } else if (char.animationState === ANIMATION_STATES.RUN && char.runAwayTarget) {
+              // When running away, face the direction of movement
+              const runAwayDx = char.runAwayTarget.x - path.x
+              const runAwayDz = char.runAwayTarget.z - path.z
+              const runAwayDist = Math.sqrt(runAwayDx * runAwayDx + runAwayDz * runAwayDz)
+              
+              if (runAwayDist > 0.001) {
+                const targetRotation = Math.atan2(runAwayDx, runAwayDz)
+                let currentRot = group.rotation.y
+                
+                // Normalize angles
+                while (currentRot > Math.PI) currentRot -= Math.PI * 2
+                while (currentRot < -Math.PI) currentRot += Math.PI * 2
+                
+                let targetRot = targetRotation
+                while (targetRot > Math.PI) targetRot -= Math.PI * 2
+                while (targetRot < -Math.PI) targetRot += Math.PI * 2
+                
+                let diff = targetRot - currentRot
+                if (diff > Math.PI) diff -= Math.PI * 2
+                if (diff < -Math.PI) diff += Math.PI * 2
+                
+                // Fast rotation when running away
+                const rotationSpeed = 0.3
+                group.rotation.y += diff * rotationSpeed
+              }
             } else if (moveDistance > 0.001) {
               // Normal movement rotation
               const targetRotation = Math.atan2(totalMoveX, totalMoveZ)
@@ -1155,15 +2308,135 @@ function SkinViewerComponent() {
               group.rotation.y += rotationDelta
             }
             
-            // Update position (only if not waving)
+            // Handle drop physics (when released from drag)
+            if (!char.isFloating && char.dropVelocity !== undefined && group.position.y > 0) {
+              // Apply drop velocity
+              group.position.y += char.dropVelocity * deltaTime
+              
+              // Apply gravity
+              char.dropVelocity -= 0.5 // Gravity
+              
+              // Stop dropping when character hits ground
+              if (group.position.y <= 0) {
+                group.position.y = 0
+                char.dropVelocity = undefined
+              }
+            }
+            
+            // Handle hit timer and red overlay removal (for character-to-character hits)
+            if (char.isBeingHit && char.hitTimer !== undefined) {
+              char.hitTimer -= deltaTime
+              if (char.hitTimer <= 0) {
+                // Remove red overlay
+                char.player.traverse((obj) => {
+                  if (obj.material) {
+                    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                    materials.forEach(mat => {
+                      if (mat.color) {
+                        // Reset to original color (divide by the tint we applied)
+                        mat.color.r /= 1.5
+                        mat.color.g /= 0.5
+                        mat.color.b /= 0.5
+                        mat.needsUpdate = true
+                      }
+                    })
+                  }
+                })
+                char.isBeingHit = false
+                char.hitTimer = undefined
+              }
+            }
+            
+            // Handle knockback physics
+            if (char.knockbackVelocity) {
+              // Check minimum duration - ensure knockback lasts at least a certain time
+              const knockbackElapsed = char.knockbackStartTime ? (Date.now() - char.knockbackStartTime) / 1000 : Infinity
+              const minDuration = char.knockbackMinDuration || 0
+              
+              // Apply knockback velocity
+              path.x += char.knockbackVelocity.x * deltaTime
+              path.z += char.knockbackVelocity.z * deltaTime
+              group.position.y += char.knockbackVelocity.y * deltaTime
+              
+              // Apply gravity
+              char.knockbackVelocity.y -= char.gravity || 0.5
+              
+              // Stop knockback when character hits ground AND minimum duration has passed
+              if (group.position.y <= 0 && knockbackElapsed >= minDuration) {
+                group.position.y = 0
+                char.knockbackVelocity = null
+                char.knockbackStartTime = undefined
+                char.knockbackMinDuration = undefined
+                
+                // Check if character should start running away after knockback
+                if (char.shouldRunAway && char.runAwayTimer !== undefined) {
+                  // Start running away now that knockback is finished
+                  char.animationState = ANIMATION_STATES.RUN
+                  char.shouldRunAway = false // Clear flag
+                  char.wasHitByPlayer = false // Clear flag
+                } else if (!char.wasHitByPlayer) {
+                  // Only wave if this was NOT a player-to-player hit (i.e., user clicked them)
+                  char.animationState = ANIMATION_STATES.WAVE
+                  char.waveDuration = 4.0 + Math.random() * 2.0 // Wave for 4-6 seconds
+                  char.waveArm = Math.random() > 0.5 ? 'left' : 'right' // Randomly choose arm
+                  char.animProgress = 0 // Reset animation progress for wave
+                } else {
+                  // Was hit by player but not running away - return to walking after knockback
+                  char.animationState = ANIMATION_STATES.WALK
+                  char.wasHitByPlayer = false // Clear flag
+                }
+              } else if (group.position.y <= 0) {
+                // Hit ground but minimum duration not met - keep on ground but continue knockback timer
+                group.position.y = 0
+                // Still apply horizontal knockback
+                path.x += char.knockbackVelocity.x * deltaTime
+                path.z += char.knockbackVelocity.z * deltaTime
+              }
+            }
+            
+            // Update position (only if not waving, not being knocked back, not being dragged, and not idling)
             let newX = path.x
             let newZ = path.z
-            if (char.animationState !== ANIMATION_STATES.WAVE) {
-              // Only move when not waving
+            // isBeingDragged is already declared above in the animation state logic
+            
+            // Handle running away movement (faster than normal walking)
+            if (char.animationState === ANIMATION_STATES.RUN && char.runAwayTarget && !char.knockbackVelocity) {
+              // Move towards run away target at faster speed
+              const runAwayDx = char.runAwayTarget.x - path.x
+              const runAwayDz = char.runAwayTarget.z - path.z
+              const runAwayDist = Math.sqrt(runAwayDx * runAwayDx + runAwayDz * runAwayDz)
+              
+              if (runAwayDist > 0.1) {
+                const runSpeed = baseMoveSpeed * 2.5 // Run 2.5x faster than walking
+                const runMoveX = (runAwayDx / runAwayDist) * runSpeed
+                const runMoveZ = (runAwayDz / runAwayDist) * runSpeed
+                newX = path.x + runMoveX
+                newZ = path.z + runMoveZ
+              } else {
+                // Reached target, continue normal movement
+                const forwardDistance = path.z + moveZ
+                const sideDistance = path.x + moveX
+                newX = sideDistance
+                newZ = forwardDistance
+              }
+            } else if (char.animationState === ANIMATION_STATES.IDLE) {
+              // Stand still when idling - don't move
+              newX = path.x
+              newZ = path.z
+            } else if (char.animationState !== ANIMATION_STATES.WAVE && !char.knockbackVelocity && !isBeingDragged) {
+              // Only move when not waving, not being knocked back, not being dragged, and not idling
               const forwardDistance = path.z + moveZ
               const sideDistance = path.x + moveX
               newX = sideDistance
               newZ = forwardDistance
+            } else if (char.knockbackVelocity) {
+              // Use knockback position
+              newX = path.x
+              newZ = path.z
+            } else if (isBeingDragged) {
+              // Use dragged position (already set in handleDragMove)
+              newX = path.x
+              newZ = path.z
             }
             
             // Smoother interpolation for position - faster movement
@@ -1175,6 +2448,30 @@ function SkinViewerComponent() {
             path.x = group.position.x
             path.z = group.position.z
             
+            // Handle hit timer and red overlay
+            if (char.isHit && char.hitTimer !== undefined) {
+              char.hitTimer -= deltaTime
+              if (char.hitTimer <= 0) {
+                // Remove red overlay
+                char.player.traverse((obj) => {
+                  if (obj.material) {
+                    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                    materials.forEach(mat => {
+                      if (mat.color) {
+                        // Reset to original color (divide by the tint we applied)
+                        mat.color.r /= 1.5
+                        mat.color.g /= 0.5
+                        mat.color.b /= 0.5
+                        mat.needsUpdate = true
+                      }
+                    })
+                  }
+                })
+                char.isHit = false
+                char.hitTimer = undefined
+              }
+            }
+            
             // Apply animation based on state
             if (player) {
               if (!char.animProgress) char.animProgress = 0
@@ -1184,8 +2481,16 @@ function SkinViewerComponent() {
               
               // Apply animation based on state
               try {
-                if (char.animationState === ANIMATION_STATES.WAVE) {
+                // Hit animation takes priority - plays once when hitting, then returns to walking
+                if (char.isHitting && char.hitAnimationTimer !== undefined) {
+                  HitAnimation(player, char.animProgress)
+                } else if (char.animationState === ANIMATION_STATES.WAVE) {
                   WaveAnimation(player, char.animProgress, char.waveArm || 'left')
+                } else if (char.animationState === ANIMATION_STATES.IDLE) {
+                  IdleAnimation(player, char.animProgress)
+                } else if (char.animationState === ANIMATION_STATES.RUN) {
+                  // Run animation only used when running away after being hit
+                  RunningAnimation(player, char.animProgress)
                 } else {
                   WalkingAnimationNoHeadBob(player, char.animProgress)
                 }
@@ -1228,6 +2533,33 @@ function SkinViewerComponent() {
         clearInterval(syncIntervalRef.current)
       }
       window.removeEventListener('resize', handleResize)
+      const canvas = canvasRef.current
+      if (canvas) {
+        if (handleClickRef.current) {
+          canvas.removeEventListener('click', handleClickRef.current)
+        }
+        if (handleMouseMoveRef.current) {
+          canvas.removeEventListener('mousemove', handleMouseMoveRef.current)
+        }
+        // Remove drag handlers
+        if (handleMouseDownRef.current) {
+          canvas.removeEventListener('mousedown', handleMouseDownRef.current)
+          canvas.removeEventListener('touchstart', handleMouseDownRef.current)
+        }
+        if (handleDragMoveRef.current) {
+          canvas.removeEventListener('mousemove', handleDragMoveRef.current)
+          canvas.removeEventListener('touchmove', handleDragMoveRef.current)
+        }
+        if (handleMouseUpRef.current) {
+          canvas.removeEventListener('mouseup', handleMouseUpRef.current)
+          canvas.removeEventListener('touchend', handleMouseUpRef.current)
+        }
+        // Remove hover effect from any hovered character
+        if (hoveredCharRef.current && removeHoverEffectRef.current) {
+          removeHoverEffectRef.current(hoveredCharRef.current)
+        }
+        canvas.style.cursor = 'default'
+      }
       // Clean up blob URL if created
       if (skinBlobUrlRef.current && skinBlobUrlRef.current.startsWith('blob:')) {
         URL.revokeObjectURL(skinBlobUrlRef.current)
@@ -1267,6 +2599,9 @@ function SkinViewerComponent() {
       </div>
       <div className="info-box">
         You're looking at everybody online on Craft Down Under right now!
+      </div>
+      <div className="player-count">
+        {playerCount} {playerCount === 1 ? 'player' : 'players'} online
       </div>
       <div className="chatbox">
         <div className="chatbox-messages" ref={chatMessagesRef}>

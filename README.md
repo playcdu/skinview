@@ -6,10 +6,15 @@ An animated React website featuring all online Minecraft players from Craft Down
 
 - 🎮 **Real-Time Player Sync** - Automatically fetches and displays all online players from Craft Down Under servers
 - 🚶 **Custom Walking Animation** - Smooth walking animation without head bobbing
-- 👋 **Wave Animation** - Characters occasionally stop, face the camera, and wave for 4-6 seconds
-- 🌐 **Independent Movement** - Characters move independently in 3D space with collision avoidance
+- 👋 **Wave Animation** - Characters wave when spawning in or when hit by the user
+- 🌐 **Intelligent Pathfinding** - Characters path to the least crowded areas, avoiding obstacles and steering around blocked paths
+- 🎯 **Idle Behavior** - Characters stand still and idle when reaching their destination before choosing a new path
+- 👊 **Player Interactions** - Characters occasionally decide to hit other players, causing knockback and run-away behavior
+- 🖱️ **Click-to-Hit** - Click on characters to hit them (red overlay, knockback, then wave)
+- 🖱️ **Click-and-Drag** - Drag characters around the scene (they float and play idle animation)
 - 🏷️ **Nametags** - Player usernames displayed above each character
 - 💬 **Live Chatbox** - Shows login/logout messages in real-time (bottom-right corner)
+- 📊 **Player Count** - Displays total number of online players (top-left)
 - ℹ️ **Info Box** - Displays "You're looking at everybody online on Craft Down Under right now!" (top-center)
 - 🎨 **Starfield Background** - Animated starfield for depth perception
 - 📷 **Fixed Camera** - 45-degree angle view, 500m away (no controls)
@@ -95,17 +100,23 @@ skinview/
 
 ### Character System
 - Each character loads its unique skin from `https://heads.playcdu.co/skin/{username}`
-- Characters spawn in a circular distribution pattern to avoid center bias
-- Each character has independent movement, animation state, and collision avoidance
+- Characters spawn in a circular distribution pattern and wave on spawn
+- Each character has independent movement, animation state, collision avoidance, and pathfinding
 - Characters maintain their state (position, animation) when other players join/leave
+- **Player-to-Player Hits**: Characters have a 0.8% chance every 5 seconds to decide to hit another player
+- **Hit Behavior**: Hitting characters path directly to target, play hit animation, then return to walking
+- **Run-Away Behavior**: Hit characters receive knockback, run away (with slight bias towards center), then return to walking
 
 ### Movement & Animation
 - Custom `WalkingAnimationNoHeadBob` function prevents head bobbing
-- Characters move towards random targets in a circular area (50-200 units radius)
-- Collision avoidance system keeps characters at least 50 units apart
-- Center repulsion pushes characters away from the center when within 60 units
-- Turn speed is clamped to prevent rapid flip-flopping when avoiding multiple characters
-- **Wave Animation**: Characters occasionally stop, face camera, and wave for 4-6 seconds
+- **Intelligent Pathfinding**: Characters sample 25 candidate positions and select targets in the least crowded areas (top 20% lowest density)
+- **Target Selection**: Prioritizes empty areas, avoids other characters' targets, and prefers areas away from the bottom of the screen
+- **Movement Speed**: Normal walking is 15% slower than base speed; running and seeking targets use faster speeds
+- **Idle Behavior**: Characters idle for 1.5-4 seconds when reaching their target (within 10 units) before choosing a new path
+- **Collision Avoidance**: Characters maintain safe distances (25-30 units) and use steering behaviors to navigate around obstacles
+- **Pathfinding**: Detects stuck characters and blocked paths, uses waypoint system to steer around obstacles
+- **Screen Bounds**: Characters stay within 450 units from center, with gentle repulsion at edges
+- **Wave Animation**: Characters wave when spawning in or when hit by the user (4-6 seconds)
 - Animation runs at 24fps for consistent performance
 
 ### Camera
@@ -115,18 +126,25 @@ skinview/
 - Camera does not follow characters - provides a fixed room perspective
 - No user controls - fully automatic
 
+### User Interactions
+- **Click-to-Hit**: Click on a character to hit them (red overlay, knockback, then wave animation)
+- **Hover Effect**: Characters glow slightly when hovered (cursor changes to pointer)
+- **Click-and-Drag**: Click and drag characters to move them around (they float and play idle animation)
+- **Quick Clicks**: Quick clicks (< 200ms) trigger hit effect; longer drags move characters
+
 ### Chatbox
 - Positioned in bottom-right corner
 - Shows "{username} Logged in!" messages (green border)
 - Shows "{username} Logged out!" messages (red border)
-- Keeps last 50 messages
+- Keeps last 50 messages with deduplication (prevents duplicate messages within 2 seconds)
 - Auto-scrolls to show new messages
 - No messages shown on initial load (only changes after)
 
-### Info Box
-- Positioned at top-center of screen
-- Displays: "You're looking at everybody online on Craft Down Under right now!"
-- Semi-transparent dark background with blur effect
+### UI Elements
+- **Info Box**: Top-center, displays "You're looking at everybody online on Craft Down Under right now!"
+- **Player Count**: Top-left, shows total number of online players
+- **Chatbox**: Bottom-right, shows login/logout messages
+- All UI elements have semi-transparent dark backgrounds with blur effects
 
 ### Performance
 - Frame rate throttled to 24fps for consistent animation
@@ -146,20 +164,39 @@ syncIntervalRef.current = setInterval(() => {
 
 ### Movement Speed
 Edit `baseMoveSpeed` in `src/components/SkinViewer.jsx` (currently `2.0`).
+- Normal walking: `baseMoveSpeed * 0.85` (15% slower)
+- Seeking target: `baseMoveSpeed * 1.1` (10% faster)
+- Running away: `baseMoveSpeed * 2.5` (2.5x faster)
 
 ### Animation Speed
 Edit `animSpeed` values in `src/components/SkinViewer.jsx` (currently `0.87285`).
 
 ### Wave Animation
-- Wave duration: `2.5 + Math.random() * 1.5` (4-6 seconds)
-- Wave chance: 40% when timer expires
-- Wave timer: 10-30 seconds between opportunities
+- Wave duration: `4.0 + Math.random() * 2.0` (4-6 seconds)
+- Triggers: On spawn and when hit by user (not player-to-player hits)
+- Characters face camera during wave
+
+### Hit System
+- Hit decision chance: `0.008` (0.8% every 5 seconds)
+- Hit range: Characters must be within 12 units and facing target (within 45 degrees)
+- Hit animation: Plays once, then character returns to walking
+- Run-away duration: `3.0 + Math.random() * 2.0` (3-5 seconds)
+- Run-away bias: 10% towards center of screen
+
+### Pathfinding & Target Selection
+- `maxTargetDistance`: Currently `450` units (characters can path far from center)
+- `minTargetDistance`: Currently `60` units (minimum distance for new targets)
+- `densityRadius`: Currently `120` units (radius for detecting crowded areas)
+- Candidate sampling: 25 candidates per target selection
+- Bottom screen penalty: 50% density penalty (characters prefer not to path to bottom)
+- Target selection: Top 20% lowest density candidates, preferring furthest from center
 
 ### Camera Position
 Edit camera position in `src/components/SkinViewer.jsx`:
 - `cameraDistance`: Currently `500`
 - `angle45`: Currently `Math.PI / 4` (45 degrees)
 - `skinViewer.zoom`: Currently `0.0000002`
+- `maxDistanceFromCenter`: Currently `450` units (screen bounds)
 
 ## API Endpoints
 
@@ -170,7 +207,11 @@ Edit camera position in `src/components/SkinViewer.jsx`:
 
 - Skins are loaded using usernames (case-sensitive) from the API
 - Characters sync every 5 seconds automatically
-- No user controls - the experience is fully automatic
+- Characters path to the least crowded areas using density-based pathfinding
+- Characters idle when reaching their destination before choosing a new path
+- Player-to-player hits occur randomly (0.8% chance every 5 seconds)
+- Characters avoid the bottom of the screen when selecting targets
+- Click interactions: Quick clicks hit, longer drags move characters
 - Chat messages only appear for players who join/leave after initial load
 - Characters maintain their positions and animations when other players sync
 - Built with React hooks for state management and extensibility
