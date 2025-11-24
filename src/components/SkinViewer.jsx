@@ -36,7 +36,8 @@ const loadSkinImage = async (identifier) => {
 const ANIMATION_STATES = {
   IDLE: 'idle',
   WALK: 'walk',
-  HIT: 'hit'
+  HIT: 'hit',
+  WAVE: 'wave'
 }
 
 
@@ -77,6 +78,36 @@ const WalkingAnimationNoHeadBob = (player, progress) => {
   if (player.cape) {
     const basicCapeRotationX = Math.PI * 0.06
     player.cape.rotation.x = Math.sin(time / 1.5) * 0.06 + basicCapeRotationX
+    player.cape.visible = false
+  }
+}
+
+// Wave animation - character waves at camera
+const WaveAnimation = (player, progress, whichArm = 'left') => {
+  const skin = player.skin
+  const t = progress * 2 * Math.PI * 0.5
+  
+  const targetArm = whichArm === 'left' ? skin.leftArm : skin.rightArm
+  
+  // Wave arm - raise it up and wave side to side
+  targetArm.rotation.x = Math.PI // 180 degrees (arm raised)
+  targetArm.rotation.z = Math.sin(t) * 0.5 // Wave side to side
+  
+  // Reset other arm to neutral position
+  const otherArm = whichArm === 'left' ? skin.rightArm : skin.leftArm
+  otherArm.rotation.x = 0
+  otherArm.rotation.z = 0
+  
+  // Keep legs still
+  skin.leftLeg.rotation.x = 0
+  skin.rightLeg.rotation.x = 0
+  
+  // Keep head still and facing forward
+  skin.head.rotation.y = 0
+  skin.head.rotation.x = 0
+  
+  // Disable cape if exists
+  if (player.cape) {
     player.cape.visible = false
   }
 }
@@ -552,19 +583,19 @@ function SkinViewerComponent() {
             distance = Math.sqrt(dx * dx + dz * dz)
           }
           
-          // Strong collision avoidance - prevent clumping
-          const avoidanceRadius = 60 // Start avoiding from 60 units away
-          const minDistance = 40 // Minimum distance of 40 units
+          // Collision avoidance - prevent clumping but allow natural movement
+          const avoidanceRadius = 80 // Start avoiding from 80 units away (reduced from 120)
+          const minDistance = 50 // Minimum distance of 50 units (reduced from 80)
           let avoidX = 0
           let avoidZ = 0
           
-          // Center repulsion - push characters away from center to prevent clumping
+          // Center repulsion - gentle push away from center
           const centerDist = Math.sqrt(path.x ** 2 + path.z ** 2)
-          const centerRepulsionRadius = 50 // Start repelling from center when within 50 units
+          const centerRepulsionRadius = 60 // Start repelling from center when within 60 units (reduced)
           if (centerDist < centerRepulsionRadius && centerDist > 0) {
             const centerRepulsionStrength = (centerRepulsionRadius - centerDist) / centerRepulsionRadius
-            avoidX += (path.x / centerDist) * centerRepulsionStrength * 8 // Push away from center
-            avoidZ += (path.z / centerDist) * centerRepulsionStrength * 8
+            avoidX += (path.x / centerDist) * centerRepulsionStrength * 5 // Gentle push (reduced from 12)
+            avoidZ += (path.z / centerDist) * centerRepulsionStrength * 5
           }
           
           const allCharacters = charactersRef.current || []
@@ -578,18 +609,18 @@ function SkinViewerComponent() {
             const distZ = path.z - otherZ
             const dist = Math.sqrt(distX * distX + distZ * distZ)
             
-            // Strong avoidance when close to other characters
+            // Gentle avoidance when close to other characters
             if (dist < avoidanceRadius && dist > 0) {
               const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
-              // Strong avoidance force - turn away and move
-              avoidX += (distX / dist) * avoidStrength * 6
-              avoidZ += (distZ / dist) * avoidStrength * 6
+              // Moderate avoidance force - allows natural movement (reduced from 10)
+              avoidX += (distX / dist) * avoidStrength * 4
+              avoidZ += (distZ / dist) * avoidStrength * 4
               
-              // If very close, override target to move away immediately
+              // If very close, override target to move away (but less aggressively)
               if (dist < minDistance) {
-                path.targetX = path.x + (distX / dist) * 80
-                path.targetZ = path.z + (distZ / dist) * 80
-                path.changeTargetTime = 0.5 // Change target quickly
+                path.targetX = path.x + (distX / dist) * 60
+                path.targetZ = path.z + (distZ / dist) * 60
+                path.changeTargetTime = 1.0 // Change target less aggressively (increased from 0.5)
               }
             }
           })
@@ -675,8 +706,41 @@ function SkinViewerComponent() {
             if (!char.animationStateTimer) char.animationStateTimer = Math.random() * 10 + 5
             char.animationStateTimer -= deltaTime
             
-            // Always walking - no state changes needed
-            char.animationState = ANIMATION_STATES.WALK
+            // Initialize wave timer if not exists (only once)
+            if (char.waveTimer === undefined) {
+              char.waveTimer = Math.random() * 20 + 10 // Random time between 10-30 seconds before first wave
+              char.waveDuration = 0
+              char.waveArm = Math.random() > 0.5 ? 'left' : 'right' // Randomly choose which arm to wave
+            }
+            
+            // Wave state logic
+            if (char.animationState === ANIMATION_STATES.WAVE) {
+              // Currently waving - count down duration
+              char.waveDuration -= deltaTime
+              if (char.waveDuration <= 0) {
+                // Wave finished, return to walking
+                char.animationState = ANIMATION_STATES.WALK
+                char.waveTimer = Math.random() * 25 + 15 // Reset timer for next wave (15-40 seconds)
+                char.waveDuration = 0
+              }
+            } else {
+              // Not waving - check if it's time to wave
+              char.waveTimer -= deltaTime
+              if (char.waveTimer <= 0) {
+                // Time to wave! (occasionally, not too often)
+                if (Math.random() < 0.4) { // 40% chance when timer expires (increased from 30%)
+                  char.animationState = ANIMATION_STATES.WAVE
+                  char.waveDuration = 4.0 + Math.random() * 2.0 // Wave for 4-6 seconds (longer)
+                  char.waveArm = Math.random() > 0.5 ? 'left' : 'right' // Randomly choose arm
+                } else {
+                  // Reset timer even if we don't wave this time
+                  char.waveTimer = Math.random() * 20 + 10 // Try again in 10-30 seconds
+                }
+              } else {
+                // Normal walking
+                char.animationState = ANIMATION_STATES.WALK
+              }
+            }
             
             // Create a path that moves towards random targets with collision avoidance
             // Each character walks towards a target, then picks a new one
@@ -723,22 +787,22 @@ function SkinViewerComponent() {
               distance = Math.sqrt(dx * dx + dz * dz)
             }
             
-            // Strong collision avoidance - prevent clumping
-            const avoidanceRadius = 60 // Start avoiding from 60 units away
-            const minDistance = 40 // Minimum distance of 40 units
+            // Collision avoidance - prevent clumping but allow natural movement
+            const avoidanceRadius = 80 // Start avoiding from 80 units away (reduced from 120)
+            const minDistance = 50 // Minimum distance of 50 units (reduced from 80)
             let avoidX = 0
             let avoidZ = 0
             
-            // Center repulsion - push characters away from center to prevent clumping
+            // Center repulsion - gentle push away from center
             const centerDist = Math.sqrt(path.x ** 2 + path.z ** 2)
-            const centerRepulsionRadius = 50 // Start repelling from center when within 50 units
+            const centerRepulsionRadius = 60 // Start repelling from center when within 60 units (reduced)
             if (centerDist < centerRepulsionRadius && centerDist > 0) {
               const centerRepulsionStrength = (centerRepulsionRadius - centerDist) / centerRepulsionRadius
-              avoidX += (path.x / centerDist) * centerRepulsionStrength * 8 // Push away from center
-              avoidZ += (path.z / centerDist) * centerRepulsionStrength * 8
+              avoidX += (path.x / centerDist) * centerRepulsionStrength * 5 // Gentle push (reduced from 12)
+              avoidZ += (path.z / centerDist) * centerRepulsionStrength * 5
             }
             
-            // Second priority: Avoid other characters
+            // Second priority: Avoid other characters (gentler to allow natural movement)
             allCharacters.forEach((otherChar, otherIndex) => {
               if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
               
@@ -750,17 +814,17 @@ function SkinViewerComponent() {
               const distZ = path.z - otherZ
               const dist = Math.sqrt(distX * distX + distZ * distZ)
               
-              // Strong avoidance when close to other characters
+              // Gentle avoidance when close to other characters
               if (dist < avoidanceRadius && dist > 0) {
                 const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
-                // Strong avoidance force - turn away and move
-                avoidX += (distX / dist) * avoidStrength * 6
-                avoidZ += (distZ / dist) * avoidStrength * 6
+                // Moderate avoidance force - allows natural movement (reduced from 10)
+                avoidX += (distX / dist) * avoidStrength * 4
+                avoidZ += (distZ / dist) * avoidStrength * 4
                 
-                // If very close, override target to move away immediately
+                // If very close, override target to move away (but less aggressively)
                 if (dist < minDistance) {
                   // Calculate escape direction (away from other character)
-                  const escapeDist = 100 // Move 100 units away
+                  const escapeDist = 60 // Move 60 units away (reduced from 100)
                   const newTargetX = path.x + (distX / dist) * escapeDist
                   const newTargetZ = path.z + (distZ / dist) * escapeDist
                   
@@ -769,7 +833,7 @@ function SkinViewerComponent() {
                   if (newTargetDist >= 30) {
                     path.targetX = newTargetX
                     path.targetZ = newTargetZ
-                    path.changeTargetTime = 0.5 // Change target quickly
+                    path.changeTargetTime = 1.0 // Change target less aggressively (increased from 0.5)
                     
                     // Also update dx/dz to reflect new target
                     dx = path.targetX - path.x
@@ -796,8 +860,33 @@ function SkinViewerComponent() {
             const totalMoveZ = moveZ
             const moveDistance = Math.sqrt(totalMoveX * totalMoveX + totalMoveZ * totalMoveZ)
             
-            // Rotate to face movement direction - smoother and more responsive
-            if (moveDistance > 0.001) {
+            // Rotate to face movement direction or camera (if waving)
+            if (char.animationState === ANIMATION_STATES.WAVE) {
+              // Face camera when waving - camera is at 45 degree angle looking down
+              // Camera position: (sin(45)*500, cos(45)*500, cos(45)*500)
+              // Character needs to face towards camera position from origin
+              // Rotation angle in XZ plane: atan2(cameraX, cameraZ) = atan2(sin(45), cos(45)) = PI/4
+              const cameraAngle = Math.PI / 4 // 45 degrees
+              const targetRotation = cameraAngle // Face towards camera (PI/4 radians)
+              let currentRot = group.rotation.y
+              
+              // Normalize angles
+              while (currentRot > Math.PI) currentRot -= Math.PI * 2
+              while (currentRot < -Math.PI) currentRot += Math.PI * 2
+              
+              let targetRot = targetRotation
+              while (targetRot > Math.PI) targetRot -= Math.PI * 2
+              while (targetRot < -Math.PI) targetRot += Math.PI * 2
+              
+              let diff = targetRot - currentRot
+              if (diff > Math.PI) diff -= Math.PI * 2
+              if (diff < -Math.PI) diff += Math.PI * 2
+              
+              // Smooth rotation to face camera (faster rotation)
+              const rotationSpeed = 0.2
+              group.rotation.y += diff * rotationSpeed
+            } else if (moveDistance > 0.001) {
+              // Normal movement rotation
               const targetRotation = Math.atan2(totalMoveX, totalMoveZ)
               let currentRot = group.rotation.y
               
@@ -821,13 +910,16 @@ function SkinViewerComponent() {
               group.rotation.y += rotationDelta
             }
             
-            // Update position
-            const forwardDistance = path.z + moveZ
-            const sideDistance = path.x + moveX
-            
-            // Calculate new position
-            const newX = sideDistance
-            const newZ = forwardDistance
+            // Update position (only if not waving)
+            let newX = path.x
+            let newZ = path.z
+            if (char.animationState !== ANIMATION_STATES.WAVE) {
+              // Only move when not waving
+              const forwardDistance = path.z + moveZ
+              const sideDistance = path.x + moveX
+              newX = sideDistance
+              newZ = forwardDistance
+            }
             
             // Smoother interpolation for position - faster movement
             const lerpFactor = 0.35 // Increased from 0.25 for faster, more responsive movement
@@ -845,9 +937,13 @@ function SkinViewerComponent() {
               
               char.animProgress += deltaTime * char.animSpeed // Accumulate progress with deltaTime
               
-              // Always walking
+              // Apply animation based on state
               try {
-                WalkingAnimationNoHeadBob(player, char.animProgress)
+                if (char.animationState === ANIMATION_STATES.WAVE) {
+                  WaveAnimation(player, char.animProgress, char.waveArm || 'left')
+                } else {
+                  WalkingAnimationNoHeadBob(player, char.animProgress)
+                }
               } catch (err) {
                 console.error('Animation error:', err)
               }
@@ -1035,14 +1131,35 @@ function SkinViewerComponent() {
   }, [])
 
   const handleReset = useCallback(() => {
-    // Reset all characters
+    // Reset all characters with proper circular distribution
     const characters = charactersRef.current
+    const spacing = 120 // Base spacing between characters
+    const numChars = characters.length
+    
     characters.forEach((char, index) => {
-      char.path.x = 0
-      char.path.z = 5 + (index % 3) * 3
-      char.path.angle = (index / characters.length) * Math.PI * 2
-      char.group.position.set(char.path.x, 0, char.path.z)
+      // Use circular distribution like initial spawn
+      const angle = (index / numChars) * Math.PI * 2
+      const radius = 50 + (index % 5) * 30 // Vary radius to avoid perfect circle
+      const randomOffsetX = (Math.random() - 0.5) * spacing * 0.5
+      const randomOffsetZ = (Math.random() - 0.5) * spacing * 0.5
+      
+      const resetX = Math.cos(angle) * radius + randomOffsetX
+      const resetZ = Math.sin(angle) * radius + randomOffsetZ
+      
+      char.path.x = resetX
+      char.path.z = resetZ
+      char.path.angle = Math.random() * Math.PI * 2
+      char.path.targetX = Math.cos(Math.random() * Math.PI * 2) * (50 + Math.random() * 150)
+      char.path.targetZ = Math.sin(Math.random() * Math.PI * 2) * (50 + Math.random() * 150)
+      char.path.changeTargetTime = Math.random() * 3 + 2
+      
+      char.group.position.set(resetX, 0, resetZ)
       char.group.rotation.y = char.path.angle
+      
+      // Reset wave timer
+      char.waveTimer = Math.random() * 20 + 10
+      char.waveDuration = 0
+      char.animationState = ANIMATION_STATES.WALK
     })
     if (skinViewerRef.current) {
       const player = skinViewerRef.current.playerObject
