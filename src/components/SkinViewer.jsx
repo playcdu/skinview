@@ -1472,66 +1472,75 @@ function SkinViewerComponent() {
               while (rotDiff > Math.PI) rotDiff -= Math.PI * 2
               rotDiff = Math.abs(rotDiff)
               
-              // Only hit if VERY close (within 5 units) AND facing the target (within 30 degrees = PI/6)
-              if (dist < 5 && rotDiff < Math.PI / 6) {
+              // Only hit if VERY close (within 4 units) AND facing the target (within 30 degrees = PI/6)
+              // Make sure we're actually very close - stricter distance check
+              if (dist < 4 && dist > 0.5 && rotDiff < Math.PI / 6) {
                 // Trigger hit animation
                 char.isHitting = true
                 char.hitAnimationTimer = 0.5 // Hit animation duration
                 
                 // Apply hit to the target character
                 const targetChar = char.hitTargetPlayer
-                targetChar.isBeingHit = true
-                targetChar.hitTimer = 0.6 // Red overlay duration (increased from 0.3)
                 
-                // Apply red overlay to hit character
-                const redTint = { r: 1.5, g: 0.5, b: 0.5 }
-                targetChar.player.traverse((obj) => {
-                  if (obj.material) {
-                    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
-                    materials.forEach(mat => {
-                      if (mat.color) {
-                        mat.color.r *= redTint.r
-                        mat.color.g *= redTint.g
-                        mat.color.b *= redTint.b
-                        mat.needsUpdate = true
-                      }
-                    })
+                // Verify target is still valid and close
+                if (targetChar && targetChar.path) {
+                  targetChar.isBeingHit = true
+                  targetChar.hitTimer = 0.6 // Red overlay duration (increased from 0.3)
+                
+                  // Apply red overlay to hit character
+                  const redTint = { r: 1.5, g: 0.5, b: 0.5 }
+                  targetChar.player.traverse((obj) => {
+                    if (obj.material) {
+                      const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                      materials.forEach(mat => {
+                        if (mat.color) {
+                          mat.color.r *= redTint.r
+                          mat.color.g *= redTint.g
+                          mat.color.b *= redTint.b
+                          mat.needsUpdate = true
+                        }
+                      })
+                    }
+                  })
+                  
+                  // Apply knockback to hit character (away from hitter) - increased intensity
+                  const knockbackDirection = new Vector3(distX / dist, 0, distZ / dist)
+                  const knockbackUp = 18 // Increased from 10
+                  const knockbackBack = 15 // Increased from 8
+                  
+                  targetChar.knockbackVelocity = {
+                    x: knockbackDirection.x * knockbackBack,
+                    y: knockbackUp,
+                    z: knockbackDirection.z * knockbackBack
                   }
-                })
-                
-                // Apply knockback to hit character (away from hitter) - increased intensity
-                const knockbackDirection = new Vector3(distX / dist, 0, distZ / dist)
-                const knockbackUp = 18 // Increased from 10
-                const knockbackBack = 15 // Increased from 8
-                
-                targetChar.knockbackVelocity = {
-                  x: knockbackDirection.x * knockbackBack,
-                  y: knockbackUp,
-                  z: knockbackDirection.z * knockbackBack
+                  targetChar.gravity = 0.5
+                  targetChar.knockbackStartTime = Date.now() // Track when knockback started
+                  targetChar.knockbackMinDuration = 0.8 // Minimum knockback duration in seconds
+                  
+                  // Set up run away for after knockback finishes (don't start running yet)
+                  targetChar.runAwayTimer = 6.0 + Math.random() * 4.0 // Run for 6-10 seconds (longer duration)
+                  // Run away from hitter, but bias slightly towards center (0, 0)
+                  const runAwayX = targetX - knockbackDirection.x * 180 // Increased from 100 to 180 units
+                  const runAwayZ = targetZ - knockbackDirection.z * 180 // Increased from 100 to 180 units
+                  // Bias towards center: blend 90% away direction, 10% center direction
+                  const centerBias = 0.1
+                  targetChar.runAwayTarget = {
+                    x: runAwayX * (1 - centerBias) + 0 * centerBias, // Slight bias towards center (x=0)
+                    z: runAwayZ * (1 - centerBias) + 0 * centerBias  // Slight bias towards center (z=0)
+                  }
+                  targetChar.runAwayFrom = char // Remember who to run from
+                  targetChar.shouldRunAway = true // Flag to start running after knockback finishes
+                  // Don't set animation state to RUN yet - wait for knockback to finish
+                  targetChar.wasHitByPlayer = true // Mark that this was a player-to-player hit
+                  
+                  // Clear hit target - we've hit them
+                  char.hitTargetPlayer = null
+                  path.changeTargetTime = 0 // Allow new target selection
+                } else {
+                  // Target invalid - clear hit target
+                  char.hitTargetPlayer = null
+                  path.changeTargetTime = 0
                 }
-                targetChar.gravity = 0.5
-                targetChar.knockbackStartTime = Date.now() // Track when knockback started
-                targetChar.knockbackMinDuration = 0.8 // Minimum knockback duration in seconds
-                
-                // Set up run away for after knockback finishes (don't start running yet)
-                targetChar.runAwayTimer = 6.0 + Math.random() * 4.0 // Run for 6-10 seconds (longer duration)
-                // Run away from hitter, but bias slightly towards center (0, 0)
-                const runAwayX = targetX - knockbackDirection.x * 180 // Increased from 100 to 180 units
-                const runAwayZ = targetZ - knockbackDirection.z * 180 // Increased from 100 to 180 units
-                // Bias towards center: blend 90% away direction, 10% center direction
-                const centerBias = 0.1
-                targetChar.runAwayTarget = {
-                  x: runAwayX * (1 - centerBias) + 0 * centerBias, // Slight bias towards center (x=0)
-                  z: runAwayZ * (1 - centerBias) + 0 * centerBias  // Slight bias towards center (z=0)
-                }
-                targetChar.runAwayFrom = char // Remember who to run from
-                targetChar.shouldRunAway = true // Flag to start running after knockback finishes
-                // Don't set animation state to RUN yet - wait for knockback to finish
-                targetChar.wasHitByPlayer = true // Mark that this was a player-to-player hit
-                
-                // Clear hit target - we've hit them
-                char.hitTargetPlayer = null
-                path.changeTargetTime = 0 // Allow new target selection
               } else if (dist > 250) {
                 // Target got too far away, give up
                 char.hitTargetPlayer = null
@@ -1544,10 +1553,11 @@ function SkinViewerComponent() {
             if (char.isHitting && char.hitAnimationTimer !== undefined) {
               char.hitAnimationTimer -= deltaTime
               if (char.hitAnimationTimer <= 0) {
-                // Hit animation complete - return to walking
+                // Hit animation complete - idle for a few seconds before pathing
                 char.isHitting = false
                 char.hitAnimationTimer = undefined
-                char.animationState = ANIMATION_STATES.WALK
+                char.animationState = ANIMATION_STATES.IDLE
+                char.idleDuration = 2.0 + Math.random() * 2.0 // Idle for 2-4 seconds after hitting
                 char.animProgress = 0 // Reset animation progress
               }
             }
@@ -1557,14 +1567,17 @@ function SkinViewerComponent() {
               char.runAwayTimer -= deltaTime
               
               // Update run away target to keep running from the hitter
-              if (char.runAwayFrom && char.runAwayFrom.path) {
+              // Only update if hitter is still valid and exists
+              if (char.runAwayFrom && char.runAwayFrom.path && char.runAwayFrom.group) {
                 const hitterX = char.runAwayFrom.path.x
                 const hitterZ = char.runAwayFrom.path.z
                 const runAwayDirX = path.x - hitterX
                 const runAwayDirZ = path.z - hitterZ
                 const runAwayDist = Math.sqrt(runAwayDirX * runAwayDirX + runAwayDirZ * runAwayDirZ)
                 
-                if (runAwayDist > 0) {
+                // Only continue running away if hitter is still reasonably close (within 300 units)
+                // If hitter moved too far or was removed, stop running away
+                if (runAwayDist > 0 && runAwayDist < 300) {
                   // Keep running away from the hitter, but bias slightly towards center
                   const pureRunAwayX = path.x + (runAwayDirX / runAwayDist) * 180 // Increased from 100 to 180 units
                   const pureRunAwayZ = path.z + (runAwayDirZ / runAwayDist) * 180 // Increased from 100 to 180 units
@@ -1574,7 +1587,19 @@ function SkinViewerComponent() {
                     x: pureRunAwayX * (1 - centerBias) + 0 * centerBias, // Slight bias towards center (x=0)
                     z: pureRunAwayZ * (1 - centerBias) + 0 * centerBias  // Slight bias towards center (z=0)
                   }
+                } else {
+                  // Hitter is too far away or invalid - stop running away
+                  char.animationState = ANIMATION_STATES.WALK
+                  char.runAwayTimer = undefined
+                  char.runAwayTarget = null
+                  char.runAwayFrom = null
                 }
+              } else {
+                // Hitter reference is invalid - stop running away
+                char.animationState = ANIMATION_STATES.WALK
+                char.runAwayTimer = undefined
+                char.runAwayTarget = null
+                char.runAwayFrom = null
               }
               
               if (char.runAwayTimer <= 0) {
@@ -2344,6 +2369,12 @@ function SkinViewerComponent() {
                 })
                 char.isBeingHit = false
                 char.hitTimer = undefined
+                
+                // Start running away immediately after red overlay finishes
+                if (char.shouldRunAway && char.runAwayTimer !== undefined) {
+                  char.animationState = ANIMATION_STATES.RUN
+                  char.shouldRunAway = false // Clear flag
+                }
               }
             }
             
@@ -2368,11 +2399,9 @@ function SkinViewerComponent() {
                 char.knockbackStartTime = undefined
                 char.knockbackMinDuration = undefined
                 
-                // Check if character should start running away after knockback
-                if (char.shouldRunAway && char.runAwayTimer !== undefined) {
-                  // Start running away now that knockback is finished
-                  char.animationState = ANIMATION_STATES.RUN
-                  char.shouldRunAway = false // Clear flag
+                // If running away, continue running (don't wave or change state)
+                if (char.animationState === ANIMATION_STATES.RUN) {
+                  // Already running away - continue running
                   char.wasHitByPlayer = false // Clear flag
                 } else if (!char.wasHitByPlayer) {
                   // Only wave if this was NOT a player-to-player hit (i.e., user clicked them)
@@ -2381,8 +2410,8 @@ function SkinViewerComponent() {
                   char.waveArm = Math.random() > 0.5 ? 'left' : 'right' // Randomly choose arm
                   char.animProgress = 0 // Reset animation progress for wave
                 } else {
-                  // Was hit by player but not running away - return to walking after knockback
-                  char.animationState = ANIMATION_STATES.WALK
+                  // Was hit by player but not running away yet (will start when red overlay finishes)
+                  // Don't change state here - run-away will start when red overlay finishes
                   char.wasHitByPlayer = false // Clear flag
                 }
               } else if (group.position.y <= 0) {
