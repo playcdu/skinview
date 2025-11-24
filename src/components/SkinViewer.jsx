@@ -10,7 +10,7 @@ import './SkinViewer.css'
 const UUID = '1418475b-1029-4a9a-af78-fbf5d59dfee0'
 const UUID_NO_DASHES = '1418475b10294a9aaf78fbf5d59dfee0'
 
-// Function to get skin URL from playcdu.co API
+// Function to get skin URL from playcdu.co API (supports both UUID and username)
 const loadSkinImage = async (identifier) => {
   try {
     const skinUrl = `https://heads.playcdu.co/skin/${identifier}`
@@ -29,6 +29,41 @@ const loadSkinImage = async (identifier) => {
   } catch (error) {
     console.error('playcdu.co API failed:', error)
     throw error
+  }
+}
+
+// Function to fetch online players from API
+const fetchOnlinePlayers = async () => {
+  try {
+    const response = await fetch('https://api.playcdu.co/query', {
+      mode: 'cors',
+      cache: 'no-cache'
+    })
+    
+    if (!response.ok) {
+      throw new Error(`API fetch failed: ${response.status}`)
+    }
+    
+    const data = await response.json()
+    
+    // Extract all usernames from all servers
+    const usernames = []
+    if (Array.isArray(data)) {
+      data.forEach(server => {
+        if (server.onlinePlayerList && Array.isArray(server.onlinePlayerList)) {
+          server.onlinePlayerList.forEach(player => {
+            if (player.name && !usernames.includes(player.name)) {
+              usernames.push(player.name)
+            }
+          })
+        }
+      })
+    }
+    
+    return usernames
+  } catch (error) {
+    console.error('Error fetching online players:', error)
+    return []
   }
 }
 
@@ -121,28 +156,22 @@ function SkinViewerComponent() {
   const controlsRef = useRef(null)
   const animationFrameRef = useRef(null)
   const timeRef = useRef(0)
-  const isPausedRef = useRef(false)
   const randomActionTimerRef = useRef(null)
   const charactersRef = useRef([]) // Array to store multiple characters
   const cameraFollowRef = useRef(true)
   const originalCharStateRef = useRef(null) // Store original character animation state
   const skinBlobUrlRef = useRef(null)
   const lastFrameTimeRef = useRef(0)
+  const syncIntervalRef = useRef(null) // Store sync interval for cleanup
   const targetFPS = 24
   const frameInterval = 1000 / targetFPS // ~41.67ms per frame at 24fps
   
-  const [isPaused, setIsPaused] = useState(false)
   const [animationKey, setAnimationKey] = useState(0)
   const [currentAnimation, setCurrentAnimation] = useState(ANIMATION_STATES.IDLE)
-  const [numUsers, setNumUsers] = useState(100) // Number of users to display (1-100)
-  const [usersData, setUsersData] = useState([]) // Store fetched users
+  const [chatMessages, setChatMessages] = useState([]) // Store chat messages
+  const isInitialLoadRef = useRef(true) // Track if this is the initial load
 
-  // Update ref when state changes
-  useEffect(() => {
-    isPausedRef.current = isPaused
-  }, [isPaused])
-
-  // Initialize skin viewer - re-run when numUsers changes
+  // Initialize skin viewer
   useEffect(() => {
     if (!canvasRef.current) return
 
@@ -202,29 +231,224 @@ function SkinViewerComponent() {
     )
     skinViewer.camera.lookAt(0, 0, 0) // Look at origin where characters are
     
-    // Fetch users from API and create characters
-    fetch('https://craftdownunder.co/auth/public/featured-users')
-      .then(response => response.json())
-      .then(data => {
-        if (data.success && data.data && data.data.users) {
-          setUsersData(data.data.users)
-          const usersToUse = data.data.users.slice(0, numUsers)
-          createCharacters(skinViewer, usersToUse)
-        } else {
-          console.error('Failed to fetch users from API')
-          // Fallback to original UUID
-          createCharacters(skinViewer, [{ minecraft_uuid: UUID_NO_DASHES, minecraft_username: 'Player' }])
+    // Function to add a single character
+    function addCharacter(skinViewer, username) {
+      const characters = charactersRef.current || []
+      
+      // Check if character already exists
+      if (characters.some(char => char.username === username)) {
+        return Promise.resolve() // Already exists
+      }
+      
+      return loadSkinImage(username)
+        .then(skinUrl => {
+          return new Promise((resolve, reject) => {
+            const textureLoader = new TextureLoader()
+            textureLoader.load(
+              skinUrl,
+              (texture) => {
+                texture.needsUpdate = true
+                
+                try {
+                  const newSkinTexture = texture.clone()
+                  newSkinTexture.needsUpdate = true
+                  const newCapeTexture = null
+                  
+                  const newPlayer = new skinview3d.PlayerObject(newSkinTexture, newCapeTexture)
+                  
+                  // Disable cape/elytra
+                  newPlayer.traverse((obj) => {
+                    if (obj.name && (obj.name.toLowerCase().includes('cape') || obj.name.toLowerCase().includes('elytra'))) {
+                      obj.visible = false
+                    }
+                    if (obj === newPlayer.cape || obj === newPlayer.elytra) {
+                      obj.visible = false
+                    }
+                  })
+                  
+                  if (newPlayer.cape) {
+                    newPlayer.cape.visible = false
+                  }
+                  if (newPlayer.elytra) {
+                    newPlayer.elytra.visible = false
+                  }
+                  
+                  const characterGroup = new Group()
+                  characterGroup.add(newPlayer)
+                  
+                  // Random spawn position
+                  const spacing = 120
+                  const angle = Math.random() * Math.PI * 2
+                  const radius = 50 + Math.random() * 150
+                  const startX = Math.cos(angle) * radius + (Math.random() - 0.5) * spacing * 0.5
+                  const startZ = Math.sin(angle) * radius + (Math.random() - 0.5) * spacing * 0.5
+                  
+                  characterGroup.position.set(startX, 0, startZ)
+                  characterGroup.rotation.y = Math.random() * Math.PI * 2
+                  characterGroup.visible = true
+                  
+                  // Create nametag
+                  const nameTag = new NameTagObject(username, {
+                    font: '56px Arial',
+                    height: 6.5,
+                    textStyle: 'white',
+                    backgroundStyle: 'rgba(0,0,0,.7)',
+                    opacity: 0.5
+                  })
+                  nameTag.position.set(0, 25, 0)
+                  nameTag.renderOrder = 999
+                  characterGroup.add(nameTag)
+                  
+                  skinViewer.scene.add(characterGroup)
+                  
+                  const characterData = {
+                    group: characterGroup,
+                    player: newPlayer,
+                    nameTag: nameTag,
+                    username: username,
+                    uuid: username, // Use username as identifier
+                    animProgress: Math.random() * 2,
+                    animSpeed: 0.87285,
+                    animationState: ANIMATION_STATES.WALK,
+                    animationStateTimer: Math.random() * 10 + 5,
+                    path: {
+                      x: startX,
+                      z: startZ,
+                      angle: Math.random() * Math.PI * 2,
+                      targetX: Math.cos(Math.random() * Math.PI * 2) * (50 + Math.random() * 150),
+                      targetZ: Math.sin(Math.random() * Math.PI * 2) * (50 + Math.random() * 150),
+                      changeTargetTime: Math.random() * 3 + 2
+                    },
+                    waveTimer: undefined, // Will be initialized in animation loop
+                    waveDuration: 0,
+                    waveArm: Math.random() > 0.5 ? 'left' : 'right'
+                  }
+                  
+                  characters.push(characterData)
+                  charactersRef.current = characters
+                  console.log(`Added character: ${username}`)
+                  resolve()
+                } catch (err) {
+                  console.error(`Error creating character ${username}:`, err)
+                  reject(err)
+                }
+              },
+              undefined,
+              (error) => {
+                console.error(`Failed to load skin for ${username}:`, error)
+                reject(error)
+              }
+            )
+          })
+        })
+        .catch(err => {
+          console.error(`Error adding character ${username}:`, err)
+        })
+    }
+    
+    // Function to remove a character
+    function removeCharacter(skinViewer, username) {
+      const characters = charactersRef.current || []
+      const index = characters.findIndex(char => char.username === username)
+      
+      if (index === -1) return // Not found
+      
+      const char = characters[index]
+      
+      // Remove from scene
+      if (char.group && char.group.parent) {
+        char.group.parent.remove(char.group)
+      }
+      
+      // Dispose of resources
+      if (char.player) {
+        char.player.traverse((obj) => {
+          if (obj.geometry) obj.geometry.dispose()
+          if (obj.material) {
+            if (Array.isArray(obj.material)) {
+              obj.material.forEach(mat => {
+                if (mat.map) mat.map.dispose()
+                mat.dispose()
+              })
+            } else {
+              if (obj.material.map) obj.material.map.dispose()
+              obj.material.dispose()
+            }
+          }
+        })
+      }
+      
+      // Remove from array
+      characters.splice(index, 1)
+      charactersRef.current = characters
+      console.log(`Removed character: ${username}`)
+    }
+    
+    // Function to add chat message
+    function addChatMessage(username, type) {
+      const message = type === 'login' 
+        ? `${username} Logged in!`
+        : `${username} Logged out!`
+      
+      setChatMessages(prev => {
+        const newMessages = [...prev, { username, message, type, timestamp: Date.now() }]
+        // Keep only last 50 messages
+        return newMessages.slice(-50)
+      })
+    }
+    
+    // Function to sync characters with online players
+    async function syncCharacters() {
+      const onlineUsernames = await fetchOnlinePlayers()
+      const currentCharacters = charactersRef.current || []
+      const currentUsernames = currentCharacters.map(char => char.username)
+      
+      // Find characters to add
+      const toAdd = onlineUsernames.filter(username => !currentUsernames.includes(username))
+      
+      // Find characters to remove
+      const toRemove = currentUsernames.filter(username => !onlineUsernames.includes(username))
+      
+      // Remove characters that went offline and add chat messages (skip on initial load)
+      toRemove.forEach(username => {
+        removeCharacter(skinViewer, username)
+        if (!isInitialLoadRef.current) {
+          addChatMessage(username, 'logout')
         }
       })
-      .catch(error => {
-        console.error('Error fetching users:', error)
-        // Fallback to original UUID
-        createCharacters(skinViewer, [{ minecraft_uuid: UUID_NO_DASHES, minecraft_username: 'Player' }])
-      })
+      
+      // Add new characters and add chat messages (skip on initial load)
+      if (!isInitialLoadRef.current) {
+        toAdd.forEach(username => {
+          addChatMessage(username, 'login')
+        })
+      }
+      
+      // Add new characters
+      const addPromises = toAdd.map(username => addCharacter(skinViewer, username))
+      await Promise.all(addPromises)
+      
+      // Mark initial load as complete after first sync
+      if (isInitialLoadRef.current) {
+        isInitialLoadRef.current = false
+      }
+      
+      console.log(`Synced: ${toAdd.length} added, ${toRemove.length} removed`)
+    }
+    
+    // Initial fetch and sync
+    syncCharacters().then(() => {
+      // Set up interval to sync every 5 seconds
+      syncIntervalRef.current = setInterval(() => {
+        syncCharacters()
+      }, 5000) // 5 seconds
+    }).catch(err => {
+      console.error('Error in initial sync:', err)
+    })
     
     // Function to create characters with user data
     function createCharacters(skinViewer, users) {
-      const numCharacters = Math.min(users.length, numUsers)
+      const numCharacters = users.length
       const characters = []
       
       if (users.length === 0) return
@@ -524,7 +748,7 @@ function SkinViewerComponent() {
       
       lastFrameTimeRef.current = currentTime - (elapsed % frameInterval)
       
-      if (!isPausedRef.current) {
+      {
         const deltaTime = frameInterval / 1000 // Convert to seconds (1/24 = ~0.0417)
         timeRef.current += deltaTime
         
@@ -979,8 +1203,8 @@ function SkinViewerComponent() {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current)
       }
-      if (randomActionTimerRef.current) {
-        clearTimeout(randomActionTimerRef.current)
+      if (syncIntervalRef.current) {
+        clearInterval(syncIntervalRef.current)
       }
       window.removeEventListener('resize', handleResize)
       // Clean up blob URL if created
@@ -990,7 +1214,7 @@ function SkinViewerComponent() {
       }
       skinViewer.dispose()
     }
-  }, [numUsers]) // Re-run when numUsers changes
+  }, []) // Run once on mount
 
   // Animation transition function
   const transitionToAnimation = useCallback((newState) => {
@@ -1003,184 +1227,12 @@ function SkinViewerComponent() {
     // Don't transition if already in this state
     if (currentAnim === targetAnim) return
 
-    // Pause current animation
-    if (currentAnim) {
-      currentAnim.paused = true
-    }
-
     // Start new animation
     targetAnim.paused = false
     currentAnimationRef.current = targetAnim
     setCurrentAnimation(newState)
   }, [])
 
-  // Handle auto-return from hit/crouch animations
-  useEffect(() => {
-    if (isPaused) return
-
-    let timeoutId = null
-
-    if (currentAnimation === ANIMATION_STATES.HIT) {
-      timeoutId = setTimeout(() => {
-        transitionToAnimation(ANIMATION_STATES.WALK)
-      }, 600) // Hit animation duration
-    }
-
-    return () => {
-      if (timeoutId) clearTimeout(timeoutId)
-    }
-  }, [currentAnimation, isPaused, transitionToAnimation])
-
-  // Random action trigger system
-  useEffect(() => {
-    if (isPaused) return
-
-    const scheduleRandomAction = () => {
-      // Random time between 3-8 seconds
-      const delay = Math.random() * 5000 + 3000
-      
-      randomActionTimerRef.current = setTimeout(() => {
-        if (isPausedRef.current) return
-
-        const rand = Math.random()
-        const currentState = currentAnimation
-
-        // Don't interrupt hit or crouch animations
-        if (currentState === ANIMATION_STATES.HIT) {
-          scheduleRandomAction()
-          return
-        }
-
-        // 30% chance to crouch, 20% chance to hit
-        if (rand < 0.3) {
-          transitionToAnimation(ANIMATION_STATES.WALK)
-        } else if (rand < 0.5) {
-          transitionToAnimation(ANIMATION_STATES.HIT)
-        }
-
-        scheduleRandomAction()
-      }, delay)
-    }
-
-    scheduleRandomAction()
-
-    return () => {
-      if (randomActionTimerRef.current) {
-        clearTimeout(randomActionTimerRef.current)
-      }
-    }
-  }, [isPaused, currentAnimation, transitionToAnimation])
-
-  // Auto-transition between walk/run/idle based on movement
-  // Reduced frequency and made it less random for smoother experience
-  useEffect(() => {
-    if (isPaused) return
-
-    const interval = setInterval(() => {
-      if (isPausedRef.current) return
-      
-      const currentState = currentAnimation
-      
-      // Don't interrupt hit or crouch
-      if (currentState === ANIMATION_STATES.HIT) {
-        return
-      }
-
-      // Less frequent, more predictable transitions
-      const rand = Math.random()
-      if (rand < 0.05) {
-        // 5% chance to go idle (rare)
-        if (currentState !== ANIMATION_STATES.IDLE) {
-          transitionToAnimation(ANIMATION_STATES.IDLE)
-        }
-      } else if (rand < 0.7) {
-        // 65% chance to walk (most common)
-        if (currentState === ANIMATION_STATES.IDLE) {
-          transitionToAnimation(ANIMATION_STATES.WALK)
-        }
-      } else {
-        // 30% chance to run
-        if (currentState === ANIMATION_STATES.IDLE || currentState === ANIMATION_STATES.WALK) {
-          transitionToAnimation(ANIMATION_STATES.WALK)
-        }
-      }
-    }, 5000) // Check every 5 seconds (less frequent)
-
-    return () => clearInterval(interval)
-  }, [isPaused, currentAnimation, transitionToAnimation])
-
-  // Handle pause state changes
-  useEffect(() => {
-    const animations = animationsRef.current
-    if (animations) {
-      Object.values(animations).forEach(anim => {
-        if (anim) anim.paused = isPaused
-      })
-    }
-    if (wrapperRef.current) {
-      if (isPaused) {
-        wrapperRef.current.classList.add('paused')
-      } else {
-        wrapperRef.current.classList.remove('paused')
-      }
-    }
-  }, [isPaused])
-
-  const handlePause = useCallback(() => {
-    setIsPaused(prev => !prev)
-  }, [])
-
-  const handleReset = useCallback(() => {
-    // Reset all characters with proper circular distribution
-    const characters = charactersRef.current
-    const spacing = 120 // Base spacing between characters
-    const numChars = characters.length
-    
-    characters.forEach((char, index) => {
-      // Use circular distribution like initial spawn
-      const angle = (index / numChars) * Math.PI * 2
-      const radius = 50 + (index % 5) * 30 // Vary radius to avoid perfect circle
-      const randomOffsetX = (Math.random() - 0.5) * spacing * 0.5
-      const randomOffsetZ = (Math.random() - 0.5) * spacing * 0.5
-      
-      const resetX = Math.cos(angle) * radius + randomOffsetX
-      const resetZ = Math.sin(angle) * radius + randomOffsetZ
-      
-      char.path.x = resetX
-      char.path.z = resetZ
-      char.path.angle = Math.random() * Math.PI * 2
-      char.path.targetX = Math.cos(Math.random() * Math.PI * 2) * (50 + Math.random() * 150)
-      char.path.targetZ = Math.sin(Math.random() * Math.PI * 2) * (50 + Math.random() * 150)
-      char.path.changeTargetTime = Math.random() * 3 + 2
-      
-      char.group.position.set(resetX, 0, resetZ)
-      char.group.rotation.y = char.path.angle
-      
-      // Reset wave timer
-      char.waveTimer = Math.random() * 20 + 10
-      char.waveDuration = 0
-      char.animationState = ANIMATION_STATES.WALK
-    })
-    if (skinViewerRef.current) {
-      const player = skinViewerRef.current.playerObject
-      player.position.set(0, 0, 5) // Start closer to camera
-      player.rotation.y = 0
-      // Reset camera to fixed position - 45 degree angle from 500m away
-      const cameraDistance = 500
-      const angle45 = Math.PI / 4
-      skinViewerRef.current.camera.position.set(
-        Math.sin(angle45) * cameraDistance,
-        Math.cos(angle45) * cameraDistance,
-        Math.cos(angle45) * cameraDistance
-      )
-      skinViewerRef.current.camera.lookAt(0, 0, 0)
-      skinViewerRef.current.zoom = 0.0000002 // Zoomed out 5x more
-      skinViewerRef.current.camera.fov = 120
-    }
-    if (controlsRef.current) {
-      controlsRef.current.reset()
-    }
-  }, [])
 
   return (
     <>
@@ -1192,29 +1244,14 @@ function SkinViewerComponent() {
       >
         <canvas ref={canvasRef} id="skinCanvas" />
       </div>
-      <div className="controls">
-        <div className="slider-control">
-          <label htmlFor="userCount">Number of Users: {numUsers}</label>
-          <input
-            type="range"
-            id="userCount"
-            min="1"
-            max="100"
-            value={numUsers}
-            onChange={(e) => {
-              const newCount = parseInt(e.target.value)
-              setNumUsers(newCount)
-              // Trigger re-render to update characters
-              setAnimationKey(prev => prev + 1)
-            }}
-          />
+      <div className="chatbox">
+        <div className="chatbox-messages">
+          {chatMessages.map((msg, index) => (
+            <div key={index} className={`chat-message chat-message-${msg.type}`}>
+              {msg.message}
+            </div>
+          ))}
         </div>
-        <button onClick={handlePause}>
-          {isPaused ? 'Resume' : 'Pause'}
-        </button>
-        <button onClick={handleReset}>
-          Reset Position
-        </button>
       </div>
     </>
   )
