@@ -170,6 +170,14 @@ function SkinViewerComponent() {
   const [currentAnimation, setCurrentAnimation] = useState(ANIMATION_STATES.IDLE)
   const [chatMessages, setChatMessages] = useState([]) // Store chat messages
   const isInitialLoadRef = useRef(true) // Track if this is the initial load
+  const chatMessagesRef = useRef(null) // Ref for chat messages container
+  
+  // Auto-scroll chatbox when messages change
+  useEffect(() => {
+    if (chatMessagesRef.current) {
+      chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight
+    }
+  }, [chatMessages])
 
   // Initialize skin viewer
   useEffect(() => {
@@ -1261,7 +1269,7 @@ function SkinViewerComponent() {
         You're looking at everybody online on Craft Down Under right now!
       </div>
       <div className="chatbox">
-        <div className="chatbox-messages">
+        <div className="chatbox-messages" ref={chatMessagesRef}>
           {chatMessages.map((msg, index) => (
             <div key={index} className={`chat-message chat-message-${msg.type}`}>
               {msg.message}
