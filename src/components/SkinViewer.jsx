@@ -1731,6 +1731,21 @@ function SkinViewerComponent() {
             
             // Handle death sequence FIRST (for all dying characters - thrown or hit)
             if (char.isDying) {
+              // Play death sound on first frame of death (if not already played)
+              if (!char.deathSoundPlayed) {
+                try {
+                  const deathSound = new Audio('/oof.ogg')
+                  deathSound.volume = 0.4 // Not too loud (40% volume)
+                  deathSound.play().catch(err => {
+                    // Ignore play errors (e.g., autoplay restrictions)
+                    console.log('Could not play death sound:', err)
+                  })
+                  char.deathSoundPlayed = true
+                } catch (err) {
+                  console.log('Could not create death sound:', err)
+                }
+              }
+              
               char.deathTimer -= deltaTime
               
               // Keep character stopped (no movement during death)
@@ -1831,6 +1846,7 @@ function SkinViewerComponent() {
                 char.isThrown = false
                 char.isFloating = false
                 char.isDying = false
+                char.deathSoundPlayed = false // Reset sound flag
                 char.throwVelocity = null
                 char.dropVelocity = undefined
                 char.isHit = false
@@ -2150,6 +2166,7 @@ function SkinViewerComponent() {
                 // Character hit screen edge - start death sequence
                 char.isDying = true
                 char.deathTimer = 1.2 // Fade out over 1.2 seconds (increased from 0.3)
+                char.deathSoundPlayed = false // Reset sound flag for new death
                 char.isHit = true
                 char.hitTimer = 1.2 // Red overlay duration (matches fade out)
                 
@@ -2181,7 +2198,7 @@ function SkinViewerComponent() {
                 // Normal flying behavior (not dying)
                 // Check for collisions with other characters while flying
                 // Use infinite vertical collision (like a pole) - only check horizontal distance
-                const horizontalCollisionRadius = 8.0 // Horizontal collision radius
+                const horizontalCollisionRadius = 10.0 // Horizontal collision radius (increased from 8.0)
                 const thrownCharPos = { 
                   x: path.x, 
                   z: path.z
@@ -2209,6 +2226,7 @@ function SkinViewerComponent() {
                     // Hit character dies
                     otherChar.isDying = true
                     otherChar.deathTimer = 1.2 // Fade out over 1.2 seconds
+                    otherChar.deathSoundPlayed = false // Reset sound flag for new death
                     otherChar.isHit = true
                     otherChar.hitTimer = 1.2
                     
