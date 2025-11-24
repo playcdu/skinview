@@ -384,14 +384,27 @@ function SkinViewerComponent() {
       console.log(`Removed character: ${username}`)
     }
     
-    // Function to add chat message
+    // Function to add chat message (with deduplication)
     function addChatMessage(username, type) {
       const message = type === 'login' 
         ? `${username} Logged in!`
         : `${username} Logged out!`
       
       setChatMessages(prev => {
-        const newMessages = [...prev, { username, message, type, timestamp: Date.now() }]
+        // Check if this exact message was added recently (within last 2 seconds)
+        const now = Date.now()
+        const recentDuplicate = prev.some(msg => 
+          msg.username === username && 
+          msg.type === type && 
+          (now - msg.timestamp) < 2000
+        )
+        
+        // Skip if duplicate found
+        if (recentDuplicate) {
+          return prev
+        }
+        
+        const newMessages = [...prev, { username, message, type, timestamp: now }]
         // Keep only last 50 messages
         return newMessages.slice(-50)
       })
