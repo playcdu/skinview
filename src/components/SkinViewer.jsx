@@ -1852,9 +1852,9 @@ function SkinViewerComponent() {
                 char.isHit = false
                 char.hitTimer = undefined
                 char.animationState = ANIMATION_STATES.WAVE // Wave on respawn
-                char.waveDuration = 2.0 + Math.random() * 1.0
+                char.waveDuration = 4.0 + Math.random() * 2.0 // Wave for 4-6 seconds (same as spawn)
                 char.waveArm = Math.random() > 0.5 ? 'left' : 'right'
-                char.animProgress = 0
+                char.animProgress = 0 // Reset animation progress for wave
                 
                 // Reset pathing
                 char.path.changeTargetTime = Date.now() + Math.random() * 2000 + 1000
