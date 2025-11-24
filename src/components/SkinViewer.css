@@ -129,6 +129,24 @@
     transform: translateY(0);
 }
 
+.info-box {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.7);
+    color: white;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    z-index: 1000;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    pointer-events: none;
+    text-align: center;
+    white-space: nowrap;
+}
+
 .chatbox {
     position: fixed;
     bottom: 20px;

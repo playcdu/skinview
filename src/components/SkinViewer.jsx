@@ -1244,6 +1244,9 @@ function SkinViewerComponent() {
       >
         <canvas ref={canvasRef} id="skinCanvas" />
       </div>
+      <div className="info-box">
+        You're looking at everybody online on Craft Down Under right now!
+      </div>
       <div className="chatbox">
         <div className="chatbox-messages">
           {chatMessages.map((msg, index) => (
