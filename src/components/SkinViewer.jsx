@@ -3785,9 +3785,16 @@ function SkinViewerComponent() {
           )}
         </div>
       )}
-      <div className="info-box">
-        You're looking at everybody online on Craft Down Under right now!
-      </div>
+      <a 
+        href="https://craftdownunder.co" 
+        target="_blank" 
+        rel="noopener noreferrer"
+        className="info-box"
+        title="Visit Craft Down Under"
+      >
+        <span className="info-box-text">You're looking at everybody online on Craft Down Under right now!</span>
+        <span className="info-box-icon">🌐</span>
+      </a>
       <div className="player-count">
         {playerCount} {playerCount === 1 ? 'player' : 'players'} online
       </div>

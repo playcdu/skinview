@@ -14,14 +14,14 @@ function Starfield() {
 
     // Create stars
     const stars = []
-    const numStars = 200
+    const numStars = 300 // Increased from 200
     for (let i = 0; i < numStars; i++) {
       stars.push({
         x: Math.random() * canvas.width,
         y: Math.random() * canvas.height,
-        radius: Math.random() * 1.5,
+        radius: Math.random() * 1.5 + 0.5, // Increased minimum radius from 0 to 0.5
         speed: Math.random() * 0.5 + 0.1,
-        opacity: Math.random()
+        opacity: Math.random() * 0.5 + 0.5 // Increased opacity range (0.5 to 1.0 instead of 0 to 1)
       })
     }
 
@@ -38,8 +38,9 @@ function Starfield() {
           star.x = Math.random() * canvas.width
         }
 
-        // Draw star
+        // Draw star with brighter color
         ctx.globalAlpha = star.opacity
+        ctx.fillStyle = '#ffffff' // Ensure white color
         ctx.beginPath()
         ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2)
         ctx.fill()
