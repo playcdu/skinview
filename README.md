@@ -2,6 +2,8 @@
 
 An animated React website featuring all online Minecraft players from Craft Down Under servers walking around in 3D space using the skinview3d library. Characters sync in real-time with the server API, move independently with collision avoidance, and occasionally wave at the camera.
 
+🌐 **Live Site**: [https://skins.playcdu.co/](https://skins.playcdu.co/)
+
 ## Features
 
 - 🎮 **Real-Time Player Sync** - Automatically fetches and displays all online players from Craft Down Under servers

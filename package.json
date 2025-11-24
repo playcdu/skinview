@@ -1,7 +1,8 @@
 {
   "name": "skinview-react",
   "version": "1.0.0",
-  "description": "3D Minecraft skin viewer with walking animation",
+  "description": "3D Minecraft skin viewer with real-time online players from Craft Down Under - Watch all online players walk around in 3D space",
+  "homepage": "https://skins.playcdu.co/",
   "type": "module",
   "scripts": {
     "dev": "vite",
