@@ -669,9 +669,9 @@ function SkinViewerComponent() {
           draggedCharacter.isFloating = true
           // Use the raw velocity, scale it appropriately for visible effect
           draggedCharacter.throwVelocity = {
-            x: dragVelocityRef.current.x * 1.5, // Scale up for more visible effect
-            z: dragVelocityRef.current.z * 1.5,
-            y: Math.min(throwSpeed * 0.2, 15) // Reduced upward velocity - lower height (was 0.5, 35)
+            x: dragVelocityRef.current.x * 1.0, // Reduced from 1.5 to 1.0 for less intense inertia
+            z: dragVelocityRef.current.z * 1.0,
+            y: Math.min(throwSpeed * 0.15, 12) // Reduced upward velocity further (was 0.2, 15)
           }
           draggedCharacter.dropVelocity = draggedCharacter.throwVelocity.y
           draggedCharacter.animationState = ANIMATION_STATES.IDLE // Idle while flying
