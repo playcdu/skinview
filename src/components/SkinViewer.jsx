@@ -46,21 +46,25 @@ const fetchOnlinePlayers = async () => {
     
     const data = await response.json()
     
-    // Extract all usernames from all servers
-    const usernames = []
+    // Extract all players with their clusterId from all servers
+    const playersWithCluster = []
     if (Array.isArray(data)) {
       data.forEach(server => {
+        const clusterId = server.clusterId || 'UNKNOWN'
         if (server.onlinePlayerList && Array.isArray(server.onlinePlayerList)) {
           server.onlinePlayerList.forEach(player => {
-            if (player.name && !usernames.includes(player.name)) {
-              usernames.push(player.name)
+            if (player.name) {
+              playersWithCluster.push({
+                username: player.name,
+                clusterId: clusterId
+              })
             }
           })
         }
       })
     }
     
-    return usernames
+    return playersWithCluster
   } catch (error) {
     console.error('Error fetching online players:', error)
     return []
@@ -237,6 +241,9 @@ function SkinViewerComponent() {
   const draggedCharRef = useRef(null) // Currently dragged character
   const isDraggingRef = useRef(false) // Whether user is currently dragging
   const dragStartTimeRef = useRef(0) // Time when drag started
+  const lastDragPosRef = useRef({ x: 0, z: 0 }) // Last drag position for velocity calculation
+  const dragVelocityRef = useRef({ x: 0, z: 0 }) // Current drag velocity
+  const lastDragTimeRef = useRef(0) // Last drag time for velocity calculation
   const targetFPS = 24
   const frameInterval = 1000 / targetFPS // ~41.67ms per frame at 24fps
   
@@ -244,6 +251,28 @@ function SkinViewerComponent() {
   const [currentAnimation, setCurrentAnimation] = useState(ANIMATION_STATES.IDLE)
   const [chatMessages, setChatMessages] = useState([]) // Store chat messages
   const [playerCount, setPlayerCount] = useState(0) // Total number of players online
+  const [clusters, setClusters] = useState([]) // Detected player clusters
+  const [selectedCluster, setSelectedCluster] = useState(null) // Selected cluster for formation
+  const [formationMode, setFormationMode] = useState(false) // Whether formation mode is active
+  const [clusterMenuOpen, setClusterMenuOpen] = useState(false) // Whether cluster menu is open
+  
+  // Refs to access current state values in animation loop
+  const formationModeRef = useRef(false)
+  const selectedClusterRef = useRef(null)
+  const clustersRef = useRef([])
+  
+  // Update refs when state changes
+  useEffect(() => {
+    formationModeRef.current = formationMode
+  }, [formationMode])
+  
+  useEffect(() => {
+    selectedClusterRef.current = selectedCluster
+  }, [selectedCluster])
+  
+  useEffect(() => {
+    clustersRef.current = clusters
+  }, [clusters])
   const isInitialLoadRef = useRef(true) // Track if this is the initial load
   const chatMessagesRef = useRef(null) // Ref for chat messages container
   
@@ -253,6 +282,46 @@ function SkinViewerComponent() {
       chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight
     }
   }, [chatMessages])
+
+  // Detect clusters based on clusterId from API
+  const detectClusters = useCallback(() => {
+    const characters = charactersRef.current || []
+    if (characters.length === 0) {
+      setClusters([])
+      return
+    }
+
+    // Group characters by clusterId
+    const clusterMap = new Map()
+    characters.forEach(char => {
+      if (char.clusterId) {
+        if (!clusterMap.has(char.clusterId)) {
+          clusterMap.set(char.clusterId, [])
+        }
+        // Only add if not already in the array (prevent duplicates)
+        if (!clusterMap.get(char.clusterId).includes(char.username)) {
+          clusterMap.get(char.clusterId).push(char.username)
+        }
+      }
+    })
+
+    // Convert to array format
+    const detectedClusters = Array.from(clusterMap.values())
+    setClusters(detectedClusters)
+  }, [])
+
+  // Store detectClusters in a ref so it can be called from syncCharacters
+  const detectClustersRef = useRef(detectClusters)
+  detectClustersRef.current = detectClusters
+
+  // Update clusters periodically
+  useEffect(() => {
+    const clusterInterval = setInterval(() => {
+      detectClusters()
+    }, 2000) // Update clusters every 2 seconds
+
+    return () => clearInterval(clusterInterval)
+  }, [detectClusters])
 
   // Initialize skin viewer
   useEffect(() => {
@@ -394,6 +463,35 @@ function SkinViewerComponent() {
         hitChar.floatHeight = 3.0 // Float 3 units above ground
         hitChar.dropVelocity = 0 // Reset drop velocity
         hitChar.animProgress = 0 // Reset animation progress for idle
+        hitChar.throwVelocity = null // Initialize throw velocity
+        hitChar.isThrown = false // Track if character is being thrown
+        hitChar.throwRotation = { x: 0, z: 0 } // Tilt rotation during drag/throw
+        // Initialize drag tracking
+        const rect = canvas.getBoundingClientRect()
+        const clientX = event.clientX !== undefined ? event.clientX : event.touches?.[0]?.clientX
+        const clientY = event.clientY !== undefined ? event.clientY : event.touches?.[0]?.clientY
+        if (clientX !== undefined && clientY !== undefined) {
+          const mouse = new Vector2()
+          mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1
+          mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1
+          raycaster.setFromCamera(mouse, skinViewer.camera)
+          const planeNormal = new Vector3(0, 1, 0)
+          const plane = new Plane(planeNormal, 0)
+          const intersectionPoint = new Vector3()
+          raycaster.ray.intersectPlane(plane, intersectionPoint)
+          if (intersectionPoint) {
+            lastDragPosRef.current = { x: intersectionPoint.x, z: intersectionPoint.z }
+          }
+        }
+        lastDragTimeRef.current = Date.now()
+        dragVelocityRef.current = { x: 0, z: 0 }
+        hitChar.throwVelocity = { x: 0, z: 0, y: 0 } // Initialize throw velocity
+        hitChar.isThrown = false // Track if character is being thrown
+        hitChar.throwRotation = { x: 0, z: 0 } // Tilt rotation during throw
+        // Initialize drag tracking
+        lastDragPosRef.current = { x: intersectionPoint.x, z: intersectionPoint.z }
+        lastDragTimeRef.current = Date.now()
+        dragVelocityRef.current = { x: 0, z: 0 }
       }
     }
     
@@ -428,6 +526,40 @@ function SkinViewerComponent() {
         // Move character to intersection point
         const char = draggedCharRef.current
         if (char && char.group && char.path) {
+          const currentTime = Date.now()
+          const deltaTime = Math.max(0.001, (currentTime - lastDragTimeRef.current) / 1000) // Convert to seconds
+          
+          // Calculate velocity based on movement
+          const dx = intersectionPoint.x - lastDragPosRef.current.x
+          const dz = intersectionPoint.z - lastDragPosRef.current.z
+          const velocityX = deltaTime > 0 ? dx / deltaTime : 0
+          const velocityZ = deltaTime > 0 ? dz / deltaTime : 0
+          
+          // Smooth velocity with exponential moving average
+          const smoothing = 0.3
+          dragVelocityRef.current.x = dragVelocityRef.current.x * (1 - smoothing) + velocityX * smoothing
+          dragVelocityRef.current.z = dragVelocityRef.current.z * (1 - smoothing) + velocityZ * smoothing
+          
+          // Calculate movement speed for tilt
+          const speed = Math.sqrt(dragVelocityRef.current.x ** 2 + dragVelocityRef.current.z ** 2)
+          const maxTilt = Math.min(speed * 0.15, 0.4) // Max tilt of 0.4 radians (~23 degrees)
+          
+          // Initialize throw properties if not set
+          if (!char.throwRotation) {
+            char.throwRotation = { x: 0, z: 0 }
+          }
+          
+          // Apply tilt based on movement direction
+          if (speed > 0.1) {
+            const tiltDirection = Math.atan2(dragVelocityRef.current.x, dragVelocityRef.current.z)
+            char.throwRotation.x = Math.sin(tiltDirection) * maxTilt // Tilt left/right
+            char.throwRotation.z = Math.cos(tiltDirection) * maxTilt * 0.5 // Slight forward tilt
+          } else {
+            // Gradually return to neutral when not moving
+            char.throwRotation.x *= 0.9
+            char.throwRotation.z *= 0.9
+          }
+          
           // Update path position directly
           char.path.x = intersectionPoint.x
           char.path.z = intersectionPoint.z
@@ -436,10 +568,18 @@ function SkinViewerComponent() {
           char.group.position.x = intersectionPoint.x
           char.group.position.z = intersectionPoint.z
           
+          // Apply tilt rotation
+          char.group.rotation.x = char.throwRotation.x
+          char.group.rotation.z = char.throwRotation.z
+          
           // Keep character floating while dragging
           if (char.isFloating) {
             char.group.position.y = char.floatHeight || 3.0
           }
+          
+          // Update tracking
+          lastDragPosRef.current = { x: intersectionPoint.x, z: intersectionPoint.z }
+          lastDragTimeRef.current = currentTime
         }
       }
     }
@@ -468,15 +608,45 @@ function SkinViewerComponent() {
         draggedCharacter.isFloating = false
         draggedCharacter.group.position.y = 0
       } else if (wasDragging) {
-        // Was dragging - drop the character (don't hit them)
-        draggedCharacter.isFloating = false
-        draggedCharacter.dropVelocity = 0 // Start dropping
-        draggedCharacter.animationState = ANIMATION_STATES.WALK // Return to walking
+        // Was dragging - check if thrown with force
+        const throwSpeed = Math.sqrt(dragVelocityRef.current.x ** 2 + dragVelocityRef.current.z ** 2)
+        const throwThreshold = 2.0 // Lower threshold - minimum speed to trigger throw (units per second)
+        
+        // Always reset tilt immediately when released (tilt only during drag)
+        draggedCharacter.group.rotation.x = 0
+        draggedCharacter.group.rotation.z = 0
+        draggedCharacter.throwRotation = { x: 0, z: 0 }
+        
+        if (throwSpeed > throwThreshold) {
+          // Character was thrown - apply inertia
+          draggedCharacter.isThrown = true
+          draggedCharacter.isFloating = true
+          // Use the raw velocity, scale it appropriately for visible effect
+          draggedCharacter.throwVelocity = {
+            x: dragVelocityRef.current.x * 1.5, // Scale up for more visible effect
+            z: dragVelocityRef.current.z * 1.5,
+            y: Math.min(throwSpeed * 0.5, 35) // Upward velocity based on throw speed
+          }
+          draggedCharacter.dropVelocity = draggedCharacter.throwVelocity.y
+          draggedCharacter.animationState = ANIMATION_STATES.IDLE // Idle while flying
+          console.log(`🚀 Thrown ${draggedCharacter.username} with speed ${throwSpeed.toFixed(2)}, velocity=(${draggedCharacter.throwVelocity.x.toFixed(2)}, ${draggedCharacter.throwVelocity.z.toFixed(2)}, ${draggedCharacter.throwVelocity.y.toFixed(2)})`)
+        } else {
+          // Normal drop - no throw
+          draggedCharacter.isFloating = false
+          draggedCharacter.dropVelocity = 0 // Start dropping
+          draggedCharacter.animationState = ANIMATION_STATES.WALK // Return to walking
+          console.log(`📦 Dropped ${draggedCharacter.username} (speed ${throwSpeed.toFixed(2)} was below threshold ${throwThreshold})`)
+        }
+        
         // Mark that this was a drag release to prevent click handler from firing
         draggedCharacter.wasJustDragged = true
         setTimeout(() => {
           draggedCharacter.wasJustDragged = false
         }, 100) // Clear flag after 100ms
+        
+        // Reset drag tracking
+        dragVelocityRef.current = { x: 0, z: 0 }
+        lastDragPosRef.current = { x: 0, z: 0 }
       }
       
       hoveredCharRef.current = null
@@ -675,7 +845,7 @@ function SkinViewerComponent() {
     skinViewer.camera.lookAt(0, 0, 0) // Look at origin where characters are
     
     // Function to add a single character
-    function addCharacter(skinViewer, username) {
+    function addCharacter(skinViewer, username, clusterId) {
       const characters = charactersRef.current || []
       
       // Check if character already exists
@@ -750,6 +920,7 @@ function SkinViewerComponent() {
                     nameTag: nameTag,
                     username: username,
                     uuid: username, // Use username as identifier
+                    clusterId: clusterId || 'UNKNOWN', // Store clusterId from API
                     animProgress: Math.random() * 2,
                     animSpeed: 0.87285,
                     animationState: ANIMATION_STATES.WAVE, // Start with wave animation on spawn
@@ -773,7 +944,7 @@ function SkinViewerComponent() {
                   
                   characters.push(characterData)
                   charactersRef.current = characters
-                  setPlayerCount(characters.length) // Update player count
+                  // Don't update player count here - it's updated in syncCharacters
                   console.log(`Added character: ${username}`)
                   resolve()
                 } catch (err) {
@@ -829,7 +1000,7 @@ function SkinViewerComponent() {
       // Remove from array
       characters.splice(index, 1)
       charactersRef.current = characters
-      setPlayerCount(characters.length) // Update player count
+      // Don't update player count here - it's updated in syncCharacters
       console.log(`Removed character: ${username}`)
     }
     
@@ -861,12 +1032,13 @@ function SkinViewerComponent() {
     
     // Function to sync characters with online players
     async function syncCharacters() {
-      const onlineUsernames = await fetchOnlinePlayers()
+      const onlinePlayers = await fetchOnlinePlayers() // Now returns array of {username, clusterId}
       const currentCharacters = charactersRef.current || []
       const currentUsernames = currentCharacters.map(char => char.username)
+      const onlineUsernames = onlinePlayers.map(p => p.username)
       
       // Find characters to add
-      const toAdd = onlineUsernames.filter(username => !currentUsernames.includes(username))
+      const toAdd = onlinePlayers.filter(player => !currentUsernames.includes(player.username))
       
       // Find characters to remove
       const toRemove = currentUsernames.filter(username => !onlineUsernames.includes(username))
@@ -881,18 +1053,34 @@ function SkinViewerComponent() {
       
       // Add new characters and add chat messages (skip on initial load)
       if (!isInitialLoadRef.current) {
-        toAdd.forEach(username => {
-          addChatMessage(username, 'login')
+        toAdd.forEach(player => {
+          addChatMessage(player.username, 'login')
         })
       }
       
-      // Add new characters
-      const addPromises = toAdd.map(username => addCharacter(skinViewer, username))
+      // Add new characters with their clusterId
+      const addPromises = toAdd.map(player => addCharacter(skinViewer, player.username, player.clusterId))
       await Promise.all(addPromises)
+      
+      // Update clusterId for existing characters (in case they switched servers)
+      onlinePlayers.forEach(player => {
+        const existingChar = currentCharacters.find(char => char.username === player.username)
+        if (existingChar) {
+          existingChar.clusterId = player.clusterId
+        }
+      })
       
       // Mark initial load as complete after first sync
       if (isInitialLoadRef.current) {
         isInitialLoadRef.current = false
+      }
+      
+      // Update player count from online players (not from characters array to avoid double counting)
+      setPlayerCount(onlineUsernames.length)
+      
+      // Update clusters after sync
+      if (detectClustersRef.current) {
+        detectClustersRef.current()
       }
       
       console.log(`Synced: ${toAdd.length} added, ${toRemove.length} removed`)
@@ -1379,6 +1567,98 @@ function SkinViewerComponent() {
           // Get characters from ref
           const allCharacters = charactersRef.current || []
           
+          // Formation mode logic - use refs to get current values
+          const currentFormationMode = formationModeRef.current
+          const currentSelectedCluster = selectedClusterRef.current
+          const currentClusters = clustersRef.current
+          
+          if (currentFormationMode && currentSelectedCluster !== null && currentClusters.length > currentSelectedCluster) {
+            const selectedClusterUsernames = currentClusters[currentSelectedCluster]
+            const clusterCharacters = allCharacters.filter(char => 
+              selectedClusterUsernames.includes(char.username)
+            )
+            const nonClusterCharacters = allCharacters.filter(char => 
+              !selectedClusterUsernames.includes(char.username)
+            )
+            
+            // Log formation mode statistics (only once per activation)
+            const wasFormationModeActive = allCharacters.some(char => char.formationMode)
+            if (!wasFormationModeActive) {
+              const clusterId = clusterCharacters[0]?.clusterId || 'UNKNOWN'
+              const formationRows = Math.ceil(Math.sqrt(clusterCharacters.length))
+              const formationCols = Math.ceil(clusterCharacters.length / formationRows)
+              console.log(`🎯 Formation Mode Activated!`)
+              console.log(`   Cluster: ${clusterId}`)
+              console.log(`   📊 ${clusterCharacters.length} players will form up in military formation`)
+              console.log(`   🚶 ${nonClusterCharacters.length} players will walk offscreen and despawn`)
+              console.log(`   📐 Formation grid: ${formationRows} rows × ${formationCols} columns`)
+              console.log(`   ⏳ Waiting for players to reach formation positions...`)
+            }
+            
+            // Clear formation mode flags when exiting formation mode
+            allCharacters.forEach(char => {
+              if (!currentFormationMode) {
+                char.formationMode = false
+                char.shouldDespawn = false
+                if (char.path.changeTargetTime === 999999) {
+                  char.path.changeTargetTime = Math.random() * 5 + 4 // Reset to normal
+                }
+              }
+            })
+
+            // Calculate formation positions for cluster characters (military grid formation)
+            // Line up shoulder to shoulder facing camera
+            const formationRows = Math.ceil(Math.sqrt(clusterCharacters.length))
+            const formationCols = Math.ceil(clusterCharacters.length / formationRows)
+            const formationSpacing = 40 // Much more spacing between players in formation
+            const formationCenterX = 0 // Center of screen
+            const formationCenterZ = 0 // Center of screen
+
+            clusterCharacters.forEach((char, idx) => {
+              if (!char || !char.path || !char.group) return
+
+              const row = Math.floor(idx / formationCols)
+              const col = idx % formationCols
+              const offsetX = (col - (formationCols - 1) / 2) * formationSpacing
+              const offsetZ = (row - (formationRows - 1) / 2) * formationSpacing
+
+              // Set formation target
+              char.path.targetX = formationCenterX + offsetX
+              char.path.targetZ = formationCenterZ + offsetZ
+              char.path.changeTargetTime = 999999 // Prevent random target changes
+              char.formationMode = true
+              // Stop all other actions
+              char.hitTargetPlayer = null
+              char.isHitting = false
+              char.runAwayTimer = undefined
+              char.runAwayTarget = null
+              char.runAwayFrom = null
+              char.shouldRunAway = false
+              char.animationState = ANIMATION_STATES.WALK // Will change to IDLE when in position
+            })
+
+            // Make non-cluster characters run offscreen (all go right)
+            nonClusterCharacters.forEach((char, idx) => {
+              if (!char || !char.path || !char.group) return
+
+              // All characters go right (positive X)
+              const offscreenDistance = 600
+              
+              // Stagger Z positions to avoid stacking (spread them out vertically)
+              const zOffset = (idx % 10) * 8 - 36 // Spread across Z axis (-36 to +36)
+              
+              // Path to offscreen right only - keep Z staggered to avoid collisions
+              char.path.targetX = offscreenDistance
+              char.path.targetZ = zOffset // Staggered Z position to avoid stacking
+              char.path.changeTargetTime = 999999 // Prevent random target changes
+              char.formationMode = true
+              char.shouldDespawn = true // Mark for despawning
+              char.animationState = ANIMATION_STATES.RUN // Use run animation
+              char.fadeOutOpacity = 1.0 // Track opacity for fade out
+              char.isFadedOut = false // Track if character is faded out
+            })
+          }
+
           allCharacters.forEach((char, index) => {
             // Safety checks
             if (!char || !char.path || !char.group || !char.player) {
@@ -1388,6 +1668,315 @@ function SkinViewerComponent() {
             const path = char.path
             const group = char.group
             const player = char.player
+            
+            // Skip normal movement logic if in formation mode (handled above)
+            if (char.formationMode) {
+              // Check if this is a cluster character (should form up) or non-cluster (should despawn)
+              const isClusterChar = currentFormationMode && currentSelectedCluster !== null && currentClusters.length > currentSelectedCluster && 
+                                    currentClusters[currentSelectedCluster].includes(char.username)
+              
+              if (isClusterChar) {
+                // Cluster character - move to formation position
+                const dx = path.targetX - path.x
+                const dz = path.targetZ - path.z
+                const distance = Math.sqrt(dx * dx + dz * dz)
+                
+                if (distance > 0.3) {
+                  // Move towards formation position
+                  const moveSpeed = baseMoveSpeed * 5.0 // Much faster movement in formation mode
+                  const moveX = (dx / distance) * moveSpeed
+                  const moveZ = (dz / distance) * moveSpeed
+                  
+                  path.x += moveX * deltaTime
+                  path.z += moveZ * deltaTime
+                  group.position.x = path.x
+                  group.position.z = path.z
+                  
+                  // Face the direction they are walking (not camera)
+                  if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+                    const targetRotation = Math.atan2(dx, dz)
+                    let currentRot = group.rotation.y
+                    while (currentRot > Math.PI) currentRot -= Math.PI * 2
+                    while (currentRot < -Math.PI) currentRot += Math.PI * 2
+                    let targetRot = targetRotation
+                    while (targetRot > Math.PI) targetRot -= Math.PI * 2
+                    while (targetRot < -Math.PI) targetRot += Math.PI * 2
+                    let diff = targetRot - currentRot
+                    if (diff > Math.PI) diff -= Math.PI * 2
+                    if (diff < -Math.PI) diff += Math.PI * 2
+                    const rotationSpeed = 0.5
+                    group.rotation.y += diff * rotationSpeed
+                  }
+                  
+                  // Play walking animation (only if not already waving)
+                  if (char.animationState !== ANIMATION_STATES.WAVE) {
+                    char.animationState = ANIMATION_STATES.WALK
+                    char.animProgress += deltaTime * char.animSpeed
+                    try {
+                      WalkingAnimationNoHeadBob(player, char.animProgress)
+                    } catch (err) {
+                      console.error('Animation error:', err)
+                    }
+                  }
+                } else {
+                  // Reached formation position - idle and face camera
+                  if (char.animationState === ANIMATION_STATES.WALK) {
+                    // Mark that this character has reached formation position
+                    char.reachedFormationPosition = true
+                    char.animationState = ANIMATION_STATES.IDLE
+                    char.animProgress = 0 // Reset animation progress for idle
+                    
+                    // Count how many have reached formation
+                    const clusterCharacters = allCharacters.filter(c => 
+                      c.formationMode && !c.shouldDespawn && currentSelectedCluster !== null && 
+                      currentClusters[currentSelectedCluster]?.includes(c.username)
+                    )
+                    const reachedCount = clusterCharacters.filter(c => c.reachedFormationPosition).length
+                    const totalCount = clusterCharacters.length
+                    
+                    if (reachedCount === totalCount && totalCount > 0) {
+                      console.log(`   ✅ All ${totalCount} players have reached formation positions!`)
+                    } else {
+                      console.log(`   ✅ ${char.username} reached formation (${reachedCount}/${totalCount})`)
+                    }
+                  }
+                  
+                  // Stop moving - character has reached formation position
+                  // Don't update path.x or path.z - keep them at formation position
+                  
+                  // Face camera
+                  const cameraAngle = Math.PI / 4 // 45 degrees
+                  let currentRot = group.rotation.y
+                  while (currentRot > Math.PI) currentRot -= Math.PI * 2
+                  while (currentRot < -Math.PI) currentRot += Math.PI * 2
+                  let diff = cameraAngle - currentRot
+                  if (diff > Math.PI) diff -= Math.PI * 2
+                  if (diff < -Math.PI) diff += Math.PI * 2
+                  const rotationSpeed = 0.5
+                  group.rotation.y += diff * rotationSpeed
+                  
+                  // Idle animation
+                  char.animProgress += deltaTime * char.animSpeed
+                  try {
+                    IdleAnimation(player, char.animProgress)
+                  } catch (err) {
+                    console.error('Animation error:', err)
+                  }
+                }
+              } else {
+                // Non-cluster character - run offscreen and fade out (left/right only)
+                const dx = path.targetX - path.x
+                const targetZ = 0 // Always move to center Z for horizontal movement
+                const dz = targetZ - path.z
+                
+                // Initialize fade out opacity if not set
+                if (char.fadeOutOpacity === undefined) {
+                  char.fadeOutOpacity = 1.0
+                  char.isFadedOut = false
+                }
+                
+                // First, move to center Z if not already there (quickly)
+                if (Math.abs(dz) > 0.5) {
+                  // Move towards center Z quickly
+                  const zMoveSpeed = baseMoveSpeed * 10
+                  const moveZ = (dz > 0 ? 1 : -1) * zMoveSpeed * deltaTime
+                  path.z += moveZ
+                  group.position.z = path.z
+                } else {
+                  // At center Z, now move horizontally only
+                  path.z = 0
+                  group.position.z = 0
+                }
+                
+                // Move horizontally (right only) with collision avoidance
+                if (Math.abs(dx) > 0.1 || Math.abs(dz) > 0.1) {
+                  // Collision avoidance with other offscreen characters
+                  const avoidanceRadius = 15
+                  const minDistance = 12
+                  let avoidX = 0
+                  let avoidZ = 0
+                  
+                  allCharacters.forEach(otherChar => {
+                    if (otherChar === char || !otherChar.shouldDespawn || !otherChar.path) return
+                    
+                    const otherX = otherChar.path.x
+                    const otherZ = otherChar.path.z
+                    const distX = path.x - otherX
+                    const distZ = path.z - otherZ
+                    const dist = Math.sqrt(distX * distX + distZ * distZ)
+                    
+                    if (dist < avoidanceRadius && dist > 0) {
+                      const strength = (avoidanceRadius - dist) / avoidanceRadius
+                      avoidX += (distX / dist) * strength * 20
+                      avoidZ += (distZ / dist) * strength * 20
+                    }
+                  })
+                  
+                  // Apply avoidance
+                  if (Math.abs(avoidX) > 0.01 || Math.abs(avoidZ) > 0.01) {
+                    path.x += avoidX * deltaTime
+                    path.z += avoidZ * deltaTime
+                    group.position.x = path.x
+                    group.position.z = path.z
+                  }
+                  
+                  // Move towards offscreen target (very fast, like running)
+                  const moveSpeed = baseMoveSpeed * 25.0 // Much faster - all go right
+                  const moveX = (dx > 0 ? 1 : -1) * moveSpeed * deltaTime
+                  const moveZ = (dz > 0 ? 1 : -1) * moveSpeed * deltaTime
+                  
+                  path.x += moveX
+                  path.z += moveZ
+                  group.position.x = path.x
+                  group.position.z = path.z
+                  
+                  // Face movement direction (right)
+                  const targetRotation = Math.PI / 2 // Right = 90°
+                  let currentRot = group.rotation.y
+                  while (currentRot > Math.PI) currentRot -= Math.PI * 2
+                  while (currentRot < -Math.PI) currentRot += Math.PI * 2
+                  let diff = targetRotation - currentRot
+                  if (diff > Math.PI) diff -= Math.PI * 2
+                  if (diff < -Math.PI) diff += Math.PI * 2
+                  const rotationSpeed = 0.6
+                  group.rotation.y += diff * rotationSpeed
+                  
+                  // Play running animation
+                  char.animationState = ANIMATION_STATES.RUN
+                  char.animProgress += deltaTime * char.animSpeed
+                  try {
+                    RunningAnimation(player, char.animProgress)
+                  } catch (err) {
+                    console.error('Animation error:', err)
+                  }
+                } else {
+                  // Reached offscreen position - fade out
+                  if (!char.isFadedOut) {
+                    char.isFadedOut = true
+                    console.log(`   👻 ${char.username} reached offscreen position - fading out`)
+                  }
+                  
+                  // Fade out gradually
+                  if (char.fadeOutOpacity > 0) {
+                    char.fadeOutOpacity = Math.max(0, char.fadeOutOpacity - deltaTime * 2) // Fade out over 0.5 seconds
+                    
+                    // Apply opacity to all materials in the character group
+                    group.traverse((child) => {
+                      if (child.isMesh && child.material) {
+                        if (Array.isArray(child.material)) {
+                          child.material.forEach(mat => {
+                            mat.transparent = true
+                            mat.opacity = char.fadeOutOpacity
+                          })
+                        } else {
+                          child.material.transparent = true
+                          child.material.opacity = char.fadeOutOpacity
+                        }
+                      }
+                    })
+                    
+                    // Also fade nametag
+                    if (char.nameTag && char.nameTag.material) {
+                      char.nameTag.material.opacity = char.fadeOutOpacity
+                    }
+                  }
+                }
+              }
+              
+              // Skip rest of normal movement logic
+              return
+            }
+            
+            // Handle fade-in for characters that were faded out (when formation mode is cancelled)
+            if (char.fadeOutOpacity !== undefined && char.fadeOutOpacity < 1.0 && !char.isFadedOut && !char.formationMode) {
+              char.fadeOutOpacity = Math.min(1.0, char.fadeOutOpacity + deltaTime * 2) // Fade in over 0.5 seconds
+              
+              // Apply opacity to all materials
+              if (group) {
+                group.traverse((child) => {
+                  if (child.isMesh && child.material) {
+                    if (Array.isArray(child.material)) {
+                      child.material.forEach(mat => {
+                        mat.transparent = true
+                        mat.opacity = char.fadeOutOpacity
+                      })
+                    } else {
+                      child.material.transparent = true
+                      child.material.opacity = char.fadeOutOpacity
+                    }
+                  }
+                })
+              }
+              
+              // Also fade nametag
+              if (char.nameTag && char.nameTag.material) {
+                char.nameTag.material.opacity = char.fadeOutOpacity
+              }
+            }
+
+            // Don't remove characters - they fade out instead
+            // Characters are kept in scene but invisible when faded out
+            
+            // Handle thrown characters FIRST (before formation mode check)
+            if (char.isThrown && char.throwVelocity) {
+              // Apply horizontal throw velocity
+              const moveX = char.throwVelocity.x * deltaTime
+              const moveZ = char.throwVelocity.z * deltaTime
+              path.x += moveX
+              path.z += moveZ
+              group.position.x = path.x
+              group.position.z = path.z
+              
+              // Apply vertical velocity
+              group.position.y += char.dropVelocity * deltaTime
+              
+              // Apply gravity
+              char.dropVelocity -= 9.8 * deltaTime // Gravity (units per second squared)
+              
+              // Apply air resistance to horizontal velocity (gradual slowdown)
+              char.throwVelocity.x *= (1 - deltaTime * 2) // Slow down over time
+              char.throwVelocity.z *= (1 - deltaTime * 2)
+              
+              // Stop horizontal movement when velocity is very small
+              if (Math.abs(char.throwVelocity.x) < 0.1) char.throwVelocity.x = 0
+              if (Math.abs(char.throwVelocity.z) < 0.1) char.throwVelocity.z = 0
+              
+              // Keep rotation neutral while flying (no tilt)
+              group.rotation.x = 0
+              group.rotation.z = 0
+              
+              // Play idle animation while flying
+              char.animProgress += deltaTime * char.animSpeed
+              try {
+                IdleAnimation(player, char.animProgress)
+              } catch (err) {
+                console.error('Animation error:', err)
+              }
+              
+              // Stop when character hits ground
+              if (group.position.y <= 0) {
+                group.position.y = 0
+                char.isThrown = false
+                char.isFloating = false
+                char.throwVelocity = null
+                char.dropVelocity = undefined
+                char.animationState = ANIMATION_STATES.WALK // Return to walking
+                // Reset rotation
+                group.rotation.x = 0
+                group.rotation.z = 0
+                char.throwRotation = { x: 0, z: 0 }
+                console.log(`🏁 ${char.username} landed after throw`)
+              }
+              
+              // Skip rest of normal logic while thrown
+              return
+            }
+            
+            // Skip all other behaviors if in formation mode (already handled above)
+            if (char.formationMode) {
+              // Formation mode logic is handled above - skip rest of this iteration
+              return
+            }
             
             // Check if this character is being dragged (used in multiple places)
             const isBeingDragged = draggedCharRef.current === char && isDraggingRef.current
@@ -1402,7 +1991,8 @@ function SkinViewerComponent() {
             }
             
             // Very low chance to decide to hit another player (check every 5 seconds)
-            if (!char.hitTargetPlayer && !char.isHitting && char.animationState !== ANIMATION_STATES.RUN) {
+            // Skip if in formation mode
+            if (!char.formationMode && !char.hitTargetPlayer && !char.isHitting && char.animationState !== ANIMATION_STATES.RUN) {
               if (!char.hitDecisionTimer) {
                 char.hitDecisionTimer = 5.0 // Check every 5 seconds
               }
@@ -1930,13 +2520,13 @@ function SkinViewerComponent() {
             }
             
             // Check if it's time to change target
-            // Don't change target if we're walking towards a hit target or idling
+            // Don't change target if we're walking towards a hit target, idling, or in formation mode
             // Don't change target while idling - wait for idle to finish
-            if (!char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE) {
+            if (!char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE && !char.formationMode) {
               path.changeTargetTime -= deltaTime
             }
-            // Only change target if not idling (idle will trigger new target when it finishes)
-            if ((path.changeTargetTime <= 0 || distance < 5) && !char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE) {
+            // Only change target if not idling and not in formation mode (idle will trigger new target when it finishes)
+            if ((path.changeTargetTime <= 0 || distance < 5) && !char.hitTargetPlayer && char.animationState !== ANIMATION_STATES.IDLE && !char.formationMode) {
               // Try to find a less crowded area for the new target, with randomness to prevent clustering
               // Prioritize areas with the LEAST users surrounding them
               const densityRadius = 120 // Increased radius to better detect crowded areas
@@ -2333,8 +2923,9 @@ function SkinViewerComponent() {
               group.rotation.y += rotationDelta
             }
             
-            // Handle drop physics (when released from drag)
+            // Handle normal drop physics (when released from drag without throw)
             if (!char.isFloating && char.dropVelocity !== undefined && group.position.y > 0) {
+              // Normal drop (not thrown)
               // Apply drop velocity
               group.position.y += char.dropVelocity * deltaTime
               
@@ -2616,6 +3207,49 @@ function SkinViewerComponent() {
   }, [])
 
 
+  const handleClusterSelect = (clusterIndex) => {
+    if (selectedCluster === clusterIndex) {
+      // Deselect - return to normal mode
+      console.log(`🔄 Formation Mode Deactivated - returning to normal movement`)
+      setSelectedCluster(null)
+      setFormationMode(false)
+      // Clear formation mode flags and fade back in
+      const characters = charactersRef.current || []
+      characters.forEach(char => {
+        char.formationMode = false
+        char.shouldDespawn = false
+        if (char.path && char.path.changeTargetTime === 999999) {
+          char.path.changeTargetTime = Math.random() * 5 + 4 // Reset to normal
+        }
+        
+        // Reset animation state - clear RUN state and return to WALK
+        if (char.animationState === ANIMATION_STATES.RUN || char.animationState === ANIMATION_STATES.WAVE) {
+          char.animationState = ANIMATION_STATES.WALK
+          char.animProgress = 0
+        }
+        char.reachedFormationPosition = false
+        char.waveDuration = undefined
+        
+        // Fade back in if faded out
+        if (char.isFadedOut) {
+          char.isFadedOut = false
+          char.fadeOutOpacity = 0 // Start from 0 for fade in (will fade in during animation loop)
+        }
+      })
+    } else {
+      // Select cluster - enter formation mode
+      console.log(`🎯 Selecting cluster ${clusterIndex + 1}`)
+      console.log(`   Current clusters state:`, clusters)
+      console.log(`   Setting selectedCluster to:`, clusterIndex)
+      console.log(`   Setting formationMode to: true`)
+      setSelectedCluster(clusterIndex)
+      setFormationMode(true)
+      // Also update refs immediately
+      selectedClusterRef.current = clusterIndex
+      formationModeRef.current = true
+    }
+  }
+
   return (
     <>
       <Starfield />
@@ -2626,6 +3260,78 @@ function SkinViewerComponent() {
       >
         <canvas ref={canvasRef} id="skinCanvas" />
       </div>
+      {/* Cluster Selector - Hamburger Menu */}
+      {clusters.length > 0 && (
+        <div className="cluster-selector-container">
+          <button
+            className="cluster-hamburger-button"
+            onClick={() => setClusterMenuOpen(!clusterMenuOpen)}
+            aria-label="Toggle cluster menu"
+          >
+            <span className={`hamburger-line ${clusterMenuOpen ? 'open' : ''}`}></span>
+            <span className={`hamburger-line ${clusterMenuOpen ? 'open' : ''}`}></span>
+            <span className={`hamburger-line ${clusterMenuOpen ? 'open' : ''}`}></span>
+          </button>
+          {clusterMenuOpen && (
+            <div className="cluster-selector">
+              <div className="cluster-selector-header">Clusters ({clusters.length})</div>
+              <div className="cluster-list">
+                {clusters.map((cluster, index) => {
+                  // Get clusterId from first character in cluster
+                  const characters = charactersRef.current || []
+                  const firstChar = characters.find(char => cluster.includes(char.username))
+                  const clusterId = firstChar?.clusterId || `Cluster ${index + 1}`
+                  
+                  return (
+                    <button
+                      key={index}
+                      className={`cluster-button ${selectedCluster === index ? 'active' : ''}`}
+                      onClick={() => handleClusterSelect(index)}
+                    >
+                      {clusterId} ({cluster.length} players)
+                    </button>
+                  )
+                })}
+              </div>
+              {formationMode && (
+                <button
+                  className="cluster-button cancel"
+                  onClick={() => {
+                    console.log(`🔄 Formation Mode Cancelled - returning to normal movement`)
+                    setSelectedCluster(null)
+                    setFormationMode(false)
+                // Clear formation mode flags and fade back in
+                const characters = charactersRef.current || []
+                characters.forEach(char => {
+                  char.formationMode = false
+                  char.shouldDespawn = false
+                  if (char.path && char.path.changeTargetTime === 999999) {
+                    char.path.changeTargetTime = Math.random() * 5 + 4 // Reset to normal
+                  }
+                  
+                  // Reset animation state - clear RUN state and return to WALK
+                  if (char.animationState === ANIMATION_STATES.RUN || char.animationState === ANIMATION_STATES.WAVE) {
+                    char.animationState = ANIMATION_STATES.WALK
+                    char.animProgress = 0
+                  }
+                  char.reachedFormationPosition = false
+                  char.waveDuration = undefined
+                  
+                  // Fade back in if faded out
+                  if (char.isFadedOut) {
+                    char.isFadedOut = false
+                    char.fadeOutOpacity = 0 // Start from 0 for fade in (will fade in during animation loop)
+                  }
+                })
+                  }}
+                >
+                  Cancel Formation
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       <div className="info-box">
         You're looking at everybody online on Craft Down Under right now!
       </div>

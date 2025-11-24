@@ -1,0 +1,59 @@
+.background-audio-container {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    z-index: 1000;
+}
+
+/* Completely hide YouTube player - never visible */
+.youtube-player-hidden {
+    position: absolute;
+    width: 0;
+    height: 0;
+    opacity: 0;
+    pointer-events: none;
+    overflow: hidden;
+    visibility: hidden;
+    display: none;
+}
+
+.audio-button {
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: rgba(255, 255, 255, 0.7);
+    padding: 0;
+}
+
+.audio-button:hover {
+    background: rgba(0, 0, 0, 0.8);
+    border-color: rgba(255, 255, 255, 0.4);
+    transform: scale(1.1);
+    color: rgba(255, 255, 255, 1);
+}
+
+.audio-button:active {
+    transform: scale(0.95);
+}
+
+.audio-button.unmuted {
+    color: rgba(255, 255, 255, 1);
+}
+
+.audio-button.muted {
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.audio-button svg {
+    width: 24px;
+    height: 24px;
+}
+
