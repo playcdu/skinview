@@ -4,6 +4,7 @@ import { PlayerObject } from 'skinview3d'
 import { Group, Texture, TextureLoader, CanvasTexture, Raycaster, Vector2, Vector3, Box3, Sphere, Plane } from 'three'
 import { NameTagObject } from './NameTagObject'
 import Starfield from './Starfield'
+import { PLAYER_SOURCE_TYPE, CDU_API_URL, TEXT_FILE_PATH, fetchCustomPlayers } from '../config/playerSource'
 import './SkinViewer.css'
 
 // UUID with dashes for API
@@ -32,39 +33,60 @@ const loadSkinImage = async (identifier) => {
   }
 }
 
-// Function to fetch online players from API
+// Function to fetch online players based on configured source
 const fetchOnlinePlayers = async () => {
   try {
-    const response = await fetch('https://api.playcdu.co/query', {
-      mode: 'cors',
-      cache: 'no-cache'
-    })
-    
-    if (!response.ok) {
-      throw new Error(`API fetch failed: ${response.status}`)
-    }
-    
-    const data = await response.json()
-    
-    // Extract all players with their clusterId from all servers
-    const playersWithCluster = []
-    if (Array.isArray(data)) {
-      data.forEach(server => {
-        const clusterId = server.clusterId || 'UNKNOWN'
-        if (server.onlinePlayerList && Array.isArray(server.onlinePlayerList)) {
-          server.onlinePlayerList.forEach(player => {
-            if (player.name) {
-              playersWithCluster.push({
-                username: player.name,
-                clusterId: clusterId
-              })
-            }
-          })
-        }
+    if (PLAYER_SOURCE_TYPE === 'cdu_api') {
+      // Craft Down Under API
+      const response = await fetch(CDU_API_URL, {
+        mode: 'cors',
+        cache: 'no-cache'
       })
+      
+      if (!response.ok) {
+        throw new Error(`API fetch failed: ${response.status}`)
+      }
+      
+      const data = await response.json()
+      
+      // Extract all players with their clusterId from all servers
+      const playersWithCluster = []
+      if (Array.isArray(data)) {
+        data.forEach(server => {
+          const clusterId = server.clusterId || 'UNKNOWN'
+          if (server.onlinePlayerList && Array.isArray(server.onlinePlayerList)) {
+            server.onlinePlayerList.forEach(player => {
+              if (player.name) {
+                playersWithCluster.push({
+                  username: player.name,
+                  clusterId: clusterId
+                })
+              }
+            })
+          }
+        })
+      }
+      
+      return playersWithCluster
+    } else if (PLAYER_SOURCE_TYPE === 'text_file') {
+      // Text file source
+      const response = await fetch(TEXT_FILE_PATH)
+      if (!response.ok) {
+        throw new Error(`Text file fetch failed: ${response.status}`)
+      }
+      const text = await response.text()
+      const lines = text.split('\n').filter(line => line.trim().length > 0)
+      return lines.map(username => ({
+        username: username.trim(),
+        clusterId: 'DEFAULT' // No cluster info from text file
+      }))
+    } else if (PLAYER_SOURCE_TYPE === 'custom') {
+      // Custom function
+      return await fetchCustomPlayers()
+    } else {
+      console.error(`Unknown player source type: ${PLAYER_SOURCE_TYPE}`)
+      return []
     }
-    
-    return playersWithCluster
   } catch (error) {
     console.error('Error fetching online players:', error)
     return []
