@@ -1,0 +1,1107 @@
+import React, { useRef, useEffect, useState, useCallback } from 'react'
+import * as skinview3d from 'skinview3d'
+import { PlayerObject } from 'skinview3d'
+import { Group, Texture, TextureLoader, CanvasTexture } from 'three'
+import { NameTagObject } from './NameTagObject'
+import Starfield from './Starfield'
+import './SkinViewer.css'
+
+// UUID with dashes for API
+const UUID = '1418475b-1029-4a9a-af78-fbf5d59dfee0'
+const UUID_NO_DASHES = '1418475b10294a9aaf78fbf5d59dfee0'
+
+// Function to get skin URL from playcdu.co API
+const loadSkinImage = async (identifier) => {
+  try {
+    const skinUrl = `https://heads.playcdu.co/skin/${identifier}`
+    const response = await fetch(skinUrl, {
+      mode: 'cors',
+      cache: 'no-cache'
+    })
+    
+    if (!response.ok) {
+      throw new Error(`Skin fetch failed: ${response.status}`)
+    }
+    
+    const blob = await response.blob()
+    return URL.createObjectURL(blob)
+    
+  } catch (error) {
+    console.error('playcdu.co API failed:', error)
+    throw error
+  }
+}
+
+// Animation states
+const ANIMATION_STATES = {
+  IDLE: 'idle',
+  WALK: 'walk',
+  HIT: 'hit'
+}
+
+
+const PunchingAnimation = (player, time) => {
+  const skin = player.skin
+  // Punch animation - quick arm forward motion
+  time *= 10
+  const punchCycle = Math.sin(time)
+  // Right arm punches forward
+  skin.rightArm.rotation.x = punchCycle > 0 ? -Math.PI * 0.7 : -Math.PI * 0.2
+  skin.rightArm.rotation.z = punchCycle > 0 ? Math.PI * 0.1 : Math.PI * 0.02
+  // Left arm pulls back slightly
+  skin.leftArm.rotation.x = punchCycle > 0 ? Math.PI * 0.3 : Math.PI * 0.1
+  // Slight body rotation
+  skin.body.rotation.y = punchCycle > 0 ? Math.PI * 0.05 : 0
+  // Head follows punch
+  skin.head.rotation.y = punchCycle > 0 ? Math.PI * 0.03 : 0
+}
+
+// Custom walking animation without head bobbing - faster animation, slower movement
+const WalkingAnimationNoHeadBob = (player, progress) => {
+  const skin = player.skin
+  // Use progress directly, multiply by faster walking animation speed
+  const time = progress * 5.819 // 10% faster (5.29 * 1.1 = 5.819)
+  // Leg swing - slower and smoother
+  skin.leftLeg.rotation.x = Math.sin(time) * 0.5
+  skin.rightLeg.rotation.x = Math.sin(time + Math.PI) * 0.5
+  // Arm swing
+  skin.leftArm.rotation.x = Math.sin(time + Math.PI) * 0.5
+  skin.rightArm.rotation.x = Math.sin(time) * 0.5
+  const basicArmRotationZ = Math.PI * 0.02
+  skin.leftArm.rotation.z = Math.cos(time) * 0.03 + basicArmRotationZ
+  skin.rightArm.rotation.z = Math.cos(time + Math.PI) * 0.03 - basicArmRotationZ
+  // NO HEAD BOBBING - keep head still
+  skin.head.rotation.y = 0
+  skin.head.rotation.x = 0
+  // Disable cape rotation if cape exists
+  if (player.cape) {
+    const basicCapeRotationX = Math.PI * 0.06
+    player.cape.rotation.x = Math.sin(time / 1.5) * 0.06 + basicCapeRotationX
+    player.cape.visible = false
+  }
+}
+
+function SkinViewerComponent() {
+  const canvasRef = useRef(null)
+  const wrapperRef = useRef(null)
+  const skinViewerRef = useRef(null)
+  const animationsRef = useRef({})
+  const currentAnimationRef = useRef(null)
+  const controlsRef = useRef(null)
+  const animationFrameRef = useRef(null)
+  const timeRef = useRef(0)
+  const isPausedRef = useRef(false)
+  const randomActionTimerRef = useRef(null)
+  const charactersRef = useRef([]) // Array to store multiple characters
+  const cameraFollowRef = useRef(true)
+  const originalCharStateRef = useRef(null) // Store original character animation state
+  const skinBlobUrlRef = useRef(null)
+  const lastFrameTimeRef = useRef(0)
+  const targetFPS = 24
+  const frameInterval = 1000 / targetFPS // ~41.67ms per frame at 24fps
+  
+  const [isPaused, setIsPaused] = useState(false)
+  const [animationKey, setAnimationKey] = useState(0)
+  const [currentAnimation, setCurrentAnimation] = useState(ANIMATION_STATES.IDLE)
+  const [numUsers, setNumUsers] = useState(100) // Number of users to display (1-100)
+  const [usersData, setUsersData] = useState([]) // Store fetched users
+
+  // Update ref when state changes
+  useEffect(() => {
+    isPausedRef.current = isPaused
+  }, [isPaused])
+
+  // Initialize skin viewer - re-run when numUsers changes
+  useEffect(() => {
+    if (!canvasRef.current) return
+
+    const canvas = canvasRef.current
+
+    // Create skin viewer - fullscreen for 3D space effect
+    const skinViewer = new skinview3d.SkinViewer({
+      canvas: canvas,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      model: 'default'
+    })
+    
+    // Handle window resize
+    const handleResize = () => {
+      skinViewer.setSize(window.innerWidth, window.innerHeight)
+    }
+    window.addEventListener('resize', handleResize)
+
+    // Set up lighting and background - darker for room effect
+    skinViewer.renderer.setClearColor(0x0a0a0f, 1) // Very dark background
+    skinViewer.cameraLight.intensity = 1.5 // Brighter light to see character in distance
+    skinViewer.globalLight.intensity = 0.6
+    
+    // Add a subtle background gradient effect using a panorama or custom background
+    // This creates depth perception
+
+    // Store animation functions
+    animationsRef.current = {
+      walk: skinview3d.WalkingAnimation,
+      idle: skinview3d.IdleAnimation,
+      run: skinview3d.RunningAnimation
+    }
+    currentAnimationRef.current = skinview3d.WalkingAnimation
+    setCurrentAnimation(ANIMATION_STATES.WALK)
+
+    // Set zoom to make characters like ants - zoomed out 5x more
+    skinViewer.zoom = 0.0000002 // Zoomed out 5x more (0.000001 / 5 = 0.0000002)
+    skinViewer.camera.fov = 120 // Maximum field of view
+    
+    // Disable orbit controls - camera is fixed
+    const control = skinview3d.createOrbitControls(skinViewer)
+    control.enableRotate = false
+    control.enableZoom = false // Fixed zoom
+    control.enablePan = false
+    controlsRef.current = control
+    
+
+    // Fixed camera position - 45 degree angle from 500m away
+    // Camera positioned 500 units away at 45 degree angle looking down
+    const cameraDistance = 500
+    const angle45 = Math.PI / 4 // 45 degrees
+    skinViewer.camera.position.set(
+      Math.sin(angle45) * cameraDistance, // X offset
+      Math.cos(angle45) * cameraDistance, // Y height (looking down)
+      Math.cos(angle45) * cameraDistance  // Z distance
+    )
+    skinViewer.camera.lookAt(0, 0, 0) // Look at origin where characters are
+    
+    // Fetch users from API and create characters
+    fetch('https://craftdownunder.co/auth/public/featured-users')
+      .then(response => response.json())
+      .then(data => {
+        if (data.success && data.data && data.data.users) {
+          setUsersData(data.data.users)
+          const usersToUse = data.data.users.slice(0, numUsers)
+          createCharacters(skinViewer, usersToUse)
+        } else {
+          console.error('Failed to fetch users from API')
+          // Fallback to original UUID
+          createCharacters(skinViewer, [{ minecraft_uuid: UUID_NO_DASHES, minecraft_username: 'Player' }])
+        }
+      })
+      .catch(error => {
+        console.error('Error fetching users:', error)
+        // Fallback to original UUID
+        createCharacters(skinViewer, [{ minecraft_uuid: UUID_NO_DASHES, minecraft_username: 'Player' }])
+      })
+    
+    // Function to create characters with user data
+    function createCharacters(skinViewer, users) {
+      const numCharacters = Math.min(users.length, numUsers)
+      const characters = []
+      
+      if (users.length === 0) return
+      
+      // Load first user's skin for the original character
+      const firstUser = users[0]
+      loadSkinImage(firstUser.minecraft_uuid)
+      .then(skinUrl => {
+        skinBlobUrlRef.current = skinUrl
+        return skinViewer.loadSkin(skinUrl)
+      })
+      .then(() => {
+        // After skin loads, create the original character
+        const originalGroup = skinViewer.playerWrapper
+        const originalPlayer = skinViewer.playerObject
+        
+        // Disable cape/elytra for original character - traverse to find all cape/elytra objects
+        originalPlayer.traverse((obj) => {
+          if (obj.name && (obj.name.toLowerCase().includes('cape') || obj.name.toLowerCase().includes('elytra'))) {
+            obj.visible = false
+          }
+          if (obj === originalPlayer.cape || obj === originalPlayer.elytra) {
+            obj.visible = false
+          }
+        })
+        
+        // Explicitly disable cape and elytra if they exist
+        if (originalPlayer.cape) {
+          originalPlayer.cape.visible = false
+          originalPlayer.cape.traverse((obj) => {
+            if (obj.visible !== undefined) obj.visible = false
+          })
+        }
+        if (originalPlayer.elytra) {
+          originalPlayer.elytra.visible = false
+          originalPlayer.elytra.traverse((obj) => {
+            if (obj.visible !== undefined) obj.visible = false
+          })
+        }
+        
+        // Ensure original is visible
+        originalGroup.visible = true
+        originalGroup.traverse((child) => {
+          if (child.visible !== undefined) {
+            if (child.name && (child.name.toLowerCase().includes('cape') || child.name.toLowerCase().includes('elytra'))) {
+              child.visible = false
+            } else if (child !== originalPlayer.cape && child !== originalPlayer.elytra) {
+              child.visible = true
+            }
+          }
+        })
+        
+        // Set original character's starting position - random spawn (not perfect grid)
+        const spacing = 120 // Base spacing between characters
+        const gridSize = Math.ceil(Math.sqrt(numCharacters))
+        const gridX = (0 % gridSize) - gridSize / 2
+        const gridZ = Math.floor(0 / gridSize) - gridSize / 2
+        // Add significant randomness to break the perfect grid pattern
+        const randomOffsetX = (Math.random() - 0.5) * spacing * 0.8 // Random offset up to 80% of spacing
+        const randomOffsetZ = (Math.random() - 0.5) * spacing * 0.8
+        const originalStartX = gridX * spacing + randomOffsetX
+        const originalStartZ = gridZ * spacing + randomOffsetZ
+        originalGroup.position.set(originalStartX, 0, originalStartZ)
+        originalGroup.rotation.y = Math.random() * Math.PI * 2
+        
+        // Create nametag for original character using username from API
+        const originalNameTag = new NameTagObject(users[0].minecraft_username || 'Player1', {
+          font: '56px Arial', // Slightly smaller font
+          height: 6.5, // Smaller height
+          textStyle: 'white',
+          backgroundStyle: 'rgba(0,0,0,.7)',
+          opacity: 0.5 // More transparent
+        })
+        originalNameTag.position.set(0, 25, 0) // Position well above the character's head
+        originalNameTag.renderOrder = 999 // Render on top
+        originalGroup.add(originalNameTag)
+        
+        // Add original as first character
+        characters.push({
+          group: originalGroup,
+          player: originalPlayer,
+          nameTag: originalNameTag,
+          username: users[0].minecraft_username,
+          uuid: users[0].minecraft_uuid,
+          animProgress: 0,
+          animSpeed: 0.87285, // 10% faster (0.7935 * 1.1 = 0.87285)
+          animationState: ANIMATION_STATES.WALK, // Start with walking
+          animationStateTimer: Math.random() * 10 + 5, // Random timer for state changes
+          path: {
+            x: originalStartX,
+            z: originalStartZ,
+            angle: 0,
+            targetX: Math.random() * 300 - 150, // Random target
+            targetZ: Math.random() * 300 - 150
+          }
+        })
+        
+        // Now create all other characters with their own unique skins
+        const textureLoader = new TextureLoader()
+        const skinPromises = []
+        
+        // Pre-load all skins in parallel
+        for (let i = 1; i < numCharacters; i++) {
+          const user = users[i] || users[0]
+          const skinPromise = loadSkinImage(user.minecraft_uuid)
+            .then(skinUrl => {
+              return new Promise((resolve, reject) => {
+                textureLoader.load(
+                  skinUrl,
+                  (texture) => {
+                    texture.needsUpdate = true
+                    resolve({ texture, user, index: i })
+                  },
+                  undefined,
+                  (error) => {
+                    console.error(`Failed to load skin for ${user.minecraft_username}:`, error)
+                    // Fallback to first user's skin
+                    if (skinBlobUrlRef.current) {
+                      textureLoader.load(
+                        skinBlobUrlRef.current,
+                        (fallbackTexture) => {
+                          fallbackTexture.needsUpdate = true
+                          resolve({ texture: fallbackTexture, user, index: i })
+                        },
+                        undefined,
+                        reject
+                      )
+                    } else {
+                      reject(error)
+                    }
+                  }
+                )
+              })
+            })
+            .catch(err => {
+              console.error(`Error loading skin for ${user.minecraft_username}:`, err)
+              // Return null to skip this character
+              return null
+            })
+          
+          skinPromises.push(skinPromise)
+        }
+        
+        // Wait for all skins to load, then create characters
+        Promise.all(skinPromises).then(results => {
+          results.forEach((result, promiseIndex) => {
+            if (!result) return // Skip failed loads
+            
+            const { texture, user, index } = result
+            const i = index
+            
+            try {
+              // Clone the texture properly - each character needs its own texture instance
+              const newSkinTexture = texture.clone()
+              newSkinTexture.needsUpdate = true
+              // Don't create a cape texture - pass null/undefined to avoid cape issues
+              const newCapeTexture = null
+              
+              // Create new PlayerObject with this character's unique skin
+              const newPlayer = new skinview3d.PlayerObject(newSkinTexture, newCapeTexture)
+              
+              // Disable cape/elytra rendering - traverse to find all cape/elytra objects
+              newPlayer.traverse((obj) => {
+                if (obj.name && (obj.name.toLowerCase().includes('cape') || obj.name.toLowerCase().includes('elytra'))) {
+                  obj.visible = false
+                }
+                // Also check if it's the cape or elytra property
+                if (obj === newPlayer.cape || obj === newPlayer.elytra) {
+                  obj.visible = false
+                }
+              })
+              
+              // Explicitly disable cape and elytra if they exist
+              if (newPlayer.cape) {
+                newPlayer.cape.visible = false
+                newPlayer.cape.traverse((obj) => {
+                  if (obj.visible !== undefined) obj.visible = false
+                })
+              }
+              if (newPlayer.elytra) {
+                newPlayer.elytra.visible = false
+                newPlayer.elytra.traverse((obj) => {
+                  if (obj.visible !== undefined) obj.visible = false
+                })
+              }
+              
+              const characterGroup = new Group()
+              characterGroup.add(newPlayer)
+              
+              // Random spawn positions - not a perfect grid
+              const spacing = 120 // Base spacing between characters
+              const gridSize = Math.ceil(Math.sqrt(numCharacters))
+              const gridX = (i % gridSize) - gridSize / 2
+              const gridZ = Math.floor(i / gridSize) - gridSize / 2
+              // Add significant randomness to break the perfect grid pattern
+              const randomOffsetX = (Math.random() - 0.5) * spacing * 0.8 // Random offset up to 80% of spacing
+              const randomOffsetZ = (Math.random() - 0.5) * spacing * 0.8
+              const startX = gridX * spacing + randomOffsetX
+              const startZ = gridZ * spacing + randomOffsetZ
+              
+              characterGroup.position.set(startX, 0, startZ)
+              characterGroup.rotation.y = Math.random() * Math.PI * 2
+              characterGroup.visible = true
+              
+              newPlayer.traverse((obj) => {
+                // Make sure everything except cape/elytra is visible
+                if (obj.visible !== undefined) {
+                  if (obj.name && (obj.name.toLowerCase().includes('cape') || obj.name.toLowerCase().includes('elytra'))) {
+                    obj.visible = false
+                  } else if (obj !== newPlayer.cape && obj !== newPlayer.elytra) {
+                    obj.visible = true
+                  }
+                }
+              })
+              
+              // Create nametag for this character using username from API
+              const nameTag = new NameTagObject(user.minecraft_username || `Player${i + 1}`, {
+                font: '56px Arial', // Slightly smaller font
+                height: 6.5, // Smaller height
+                textStyle: 'white',
+                backgroundStyle: 'rgba(0,0,0,.7)',
+                opacity: 0.5 // More transparent
+              })
+              nameTag.position.set(0, 25, 0) // Position well above the character's head
+              nameTag.renderOrder = 999 // Render on top
+              characterGroup.add(nameTag)
+              
+              skinViewer.scene.add(characterGroup)
+              
+              // Ensure all required properties are initialized
+              const characterData = {
+                group: characterGroup,
+                player: newPlayer,
+                nameTag: nameTag,
+                username: user.minecraft_username,
+                uuid: user.minecraft_uuid,
+                animProgress: i * 0.2,
+                animSpeed: 0.87285, // 10% faster (0.7935 * 1.1 = 0.87285)
+                animationState: ANIMATION_STATES.WALK, // Start with walking
+                animationStateTimer: Math.random() * 10 + 5, // Random timer for state changes
+                path: {
+                  x: startX,
+                  z: startZ,
+                  angle: Math.random() * Math.PI * 2,
+                  targetX: Math.random() * 300 - 150,
+                  targetZ: Math.random() * 300 - 150,
+                  changeTargetTime: Math.random() * 5 + 3 // More frequent target changes
+                }
+              }
+              
+              // Validate character data before adding
+              if (characterData.group && characterData.player && characterData.path) {
+                characters.push(characterData)
+              } else {
+                console.error('Invalid character data:', characterData)
+              }
+            } catch (charError) {
+              console.error(`Error creating character ${i}:`, charError)
+            }
+          })
+          
+          // Update characters ref and render
+          charactersRef.current = characters
+          console.log(`Created ${characters.length} characters with unique skins`)
+          skinViewer.render()
+        })
+        .catch(err => {
+          console.error('Error loading skins:', err)
+        })
+      })
+      .catch(err => {
+        console.error('Error loading skin:', err)
+        // Try with dashes as fallback
+        return loadSkinImage(UUID)
+          .then(skinUrl => {
+            skinBlobUrlRef.current = skinUrl
+            return skinViewer.loadSkin(skinUrl)
+          })
+      })
+      .catch(fallbackErr => {
+        console.error('All skin loading methods failed:', fallbackErr)
+      })
+    } // End of createCharacters function
+
+    skinViewerRef.current = skinViewer
+
+    // Animation loop with 3D movement for multiple characters
+    // Throttled to 24fps for smooth animation
+    function animate(currentTime) {
+      animationFrameRef.current = requestAnimationFrame(animate)
+      
+      // Throttle to 24fps
+      const elapsed = currentTime - lastFrameTimeRef.current
+      if (elapsed < frameInterval) {
+        return // Skip this frame
+      }
+      
+      lastFrameTimeRef.current = currentTime - (elapsed % frameInterval)
+      
+      if (!isPausedRef.current) {
+        const deltaTime = frameInterval / 1000 // Convert to seconds (1/24 = ~0.0417)
+        timeRef.current += deltaTime
+        
+        // Base movement speed - will be adjusted based on animation state
+        const baseMoveSpeed = 2.0 // Increased to move further distances
+        
+        // Update all characters
+        const characters = charactersRef.current || []
+        
+        // If no cloned characters yet, use the original player
+        if (!characters || characters.length === 0) {
+          const player = skinViewer.playerObject
+          
+          // Create temporary character state for original player
+          if (!originalCharStateRef.current) {
+            originalCharStateRef.current = {
+              animationState: ANIMATION_STATES.WALK,
+              animationStateTimer: Math.random() * 10 + 5,
+              animProgress: 0,
+              animSpeed: 0.6
+            }
+          }
+          const charState = originalCharStateRef.current
+          
+          // Create a temporary path object for the original player - random movement with collision avoidance
+          const path = { 
+            x: player.position.x, 
+            z: player.position.z, 
+            angle: 0,
+            targetX: Math.random() * 400 - 200, // Larger movement area
+            targetZ: Math.random() * 400 - 200,
+            changeTargetTime: Math.random() * 3 + 2 // More frequent changes (2-5 seconds)
+          }
+          
+          // Move towards random target
+          path.changeTargetTime -= deltaTime
+          if (path.changeTargetTime <= 0) {
+            path.targetX = Math.random() * 400 - 200
+            path.targetZ = Math.random() * 400 - 200
+            path.changeTargetTime = Math.random() * 3 + 2
+          }
+          
+          let dx = path.targetX - path.x
+          let dz = path.targetZ - path.z
+          let distance = Math.sqrt(dx * dx + dz * dz)
+          
+          if (distance < 15) {
+            // Use uniform distribution in a circle to avoid center bias
+            const angle = Math.random() * Math.PI * 2
+            const radius = 50 + Math.random() * 150 // Between 50 and 200 units from center
+            path.targetX = Math.cos(angle) * radius
+            path.targetZ = Math.sin(angle) * radius
+            path.changeTargetTime = Math.random() * 3 + 2
+            dx = path.targetX - path.x
+            dz = path.targetZ - path.z
+            distance = Math.sqrt(dx * dx + dz * dz)
+          }
+          
+          // Strong collision avoidance - prevent clumping
+          const avoidanceRadius = 60 // Start avoiding from 60 units away
+          const minDistance = 40 // Minimum distance of 40 units
+          let avoidX = 0
+          let avoidZ = 0
+          
+          // Center repulsion - push characters away from center to prevent clumping
+          const centerDist = Math.sqrt(path.x ** 2 + path.z ** 2)
+          const centerRepulsionRadius = 50 // Start repelling from center when within 50 units
+          if (centerDist < centerRepulsionRadius && centerDist > 0) {
+            const centerRepulsionStrength = (centerRepulsionRadius - centerDist) / centerRepulsionRadius
+            avoidX += (path.x / centerDist) * centerRepulsionStrength * 8 // Push away from center
+            avoidZ += (path.z / centerDist) * centerRepulsionStrength * 8
+          }
+          
+          const allCharacters = charactersRef.current || []
+          allCharacters.forEach((otherChar, otherIndex) => {
+            if (!otherChar || !otherChar.path || !otherChar.group) return
+            const otherPath = otherChar.path
+            const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+            const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+            
+            const distX = path.x - otherX
+            const distZ = path.z - otherZ
+            const dist = Math.sqrt(distX * distX + distZ * distZ)
+            
+            // Strong avoidance when close to other characters
+            if (dist < avoidanceRadius && dist > 0) {
+              const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
+              // Strong avoidance force - turn away and move
+              avoidX += (distX / dist) * avoidStrength * 6
+              avoidZ += (distZ / dist) * avoidStrength * 6
+              
+              // If very close, override target to move away immediately
+              if (dist < minDistance) {
+                path.targetX = path.x + (distX / dist) * 80
+                path.targetZ = path.z + (distZ / dist) * 80
+                path.changeTargetTime = 0.5 // Change target quickly
+              }
+            }
+          })
+          
+          // Update animation state timer
+          charState.animationStateTimer -= deltaTime
+          
+          // Always walking - no state changes needed
+          charState.animationState = ANIMATION_STATES.WALK
+          
+          const moveSpeed = baseMoveSpeed
+          // Prioritize avoidance over target movement - if avoiding, reduce target movement
+          const avoidancePriority = Math.abs(avoidX) + Math.abs(avoidZ) > 0 ? 0.3 : 1.0 // Reduce target movement when avoiding
+          const moveX = ((dx / Math.max(distance, 0.1)) * moveSpeed * 5 * avoidancePriority) + avoidX * 2 // Avoidance is 2x stronger
+          const moveZ = ((dz / Math.max(distance, 0.1)) * moveSpeed * 5 * avoidancePriority) + avoidZ * 2
+          
+          const forwardDistance = path.z + moveZ
+          const sideDistance = path.x + moveX
+          
+          const newX = sideDistance
+          const newZ = forwardDistance
+          
+          const lerpFactor = 0.25
+          player.position.x += (newX - player.position.x) * lerpFactor
+          player.position.z += (newZ - player.position.z) * lerpFactor
+          
+          const oldX = path.x !== undefined ? path.x : player.position.x
+          const oldZ = path.z !== undefined ? path.z : player.position.z
+          const rotDx = player.position.x - oldX
+          const rotDz = player.position.z - oldZ
+          
+          if (Math.abs(rotDx) > 0.001 || Math.abs(rotDz) > 0.001) {
+            const targetRotation = Math.atan2(rotDx, rotDz)
+            let currentRot = player.rotation.y
+            while (currentRot > Math.PI) currentRot -= Math.PI * 2
+            while (currentRot < -Math.PI) currentRot += Math.PI * 2
+            let targetRot = targetRotation
+            while (targetRot > Math.PI) targetRot -= Math.PI * 2
+            while (targetRot < -Math.PI) targetRot += Math.PI * 2
+            let diff = targetRot - currentRot
+            if (diff > Math.PI) diff -= Math.PI * 2
+            if (diff < -Math.PI) diff += Math.PI * 2
+            // Faster, smoother rotation for original character too
+            const rotationSpeed = Math.min(0.8, Math.abs(diff) * 2 + 0.3)
+            player.rotation.y += diff * rotationSpeed
+          }
+          
+          path.x = player.position.x
+          path.z = player.position.z
+          
+          // Apply animation based on state
+          charState.animProgress += deltaTime * charState.animSpeed
+          
+          // Always walking
+          try {
+            if (player && charState.animProgress !== undefined) {
+              WalkingAnimationNoHeadBob(player, charState.animProgress)
+            }
+          } catch (err) {
+            console.error('Animation error for original character:', err)
+          }
+          
+          // Update nametag position if it exists (for original character)
+          const originalChar = characters[0]
+          if (originalChar && originalChar.nameTag) {
+            originalChar.nameTag.position.y = 25 // Keep it well above character's head
+          }
+        } else {
+          // Get characters from ref
+          const allCharacters = charactersRef.current || []
+          
+          allCharacters.forEach((char, index) => {
+            // Safety checks
+            if (!char || !char.path || !char.group || !char.player) {
+              return // Skip invalid characters
+            }
+            
+            const path = char.path
+            const group = char.group
+            const player = char.player
+            
+            // Update animation state timer
+            if (!char.animationStateTimer) char.animationStateTimer = Math.random() * 10 + 5
+            char.animationStateTimer -= deltaTime
+            
+            // Always walking - no state changes needed
+            char.animationState = ANIMATION_STATES.WALK
+            
+            // Create a path that moves towards random targets with collision avoidance
+            // Each character walks towards a target, then picks a new one
+            if (!path.changeTargetTime) {
+              path.changeTargetTime = Math.random() * 3 + 2 // Change targets more frequently (2-5 seconds)
+              // Use uniform distribution in a circle to avoid center bias
+              const angle = Math.random() * Math.PI * 2
+              const radius = 50 + Math.random() * 150 // Between 50 and 200 units from center
+              path.targetX = Math.cos(angle) * radius
+              path.targetZ = Math.sin(angle) * radius
+            }
+            
+            // Move towards target - calculate distance first
+            let dx = path.targetX - path.x
+            let dz = path.targetZ - path.z
+            let distance = Math.sqrt(dx * dx + dz * dz)
+            
+            // Check if it's time to change target - more frequent changes
+            path.changeTargetTime -= deltaTime
+            if (path.changeTargetTime <= 0 || distance < 15) {
+              // Use uniform distribution in a circle to avoid center bias
+              // Generate angle and radius for better distribution
+              const angle = Math.random() * Math.PI * 2
+              const radius = 50 + Math.random() * 150 // Between 50 and 200 units from center
+              const newTargetX = Math.cos(angle) * radius
+              const newTargetZ = Math.sin(angle) * radius
+              
+              // Ensure new target is far enough away from current position
+              const newDist = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
+              if (newDist >= 30) {
+                path.targetX = newTargetX
+                path.targetZ = newTargetZ
+              } else {
+                // If too close, try again with a different angle
+                const retryAngle = Math.random() * Math.PI * 2
+                path.targetX = Math.cos(retryAngle) * radius
+                path.targetZ = Math.sin(retryAngle) * radius
+              }
+              
+              path.changeTargetTime = Math.random() * 3 + 2 // Change targets more frequently (2-5 seconds)
+              // Recalculate dx, dz, and distance after changing target
+              dx = path.targetX - path.x
+              dz = path.targetZ - path.z
+              distance = Math.sqrt(dx * dx + dz * dz)
+            }
+            
+            // Strong collision avoidance - prevent clumping
+            const avoidanceRadius = 60 // Start avoiding from 60 units away
+            const minDistance = 40 // Minimum distance of 40 units
+            let avoidX = 0
+            let avoidZ = 0
+            
+            // Center repulsion - push characters away from center to prevent clumping
+            const centerDist = Math.sqrt(path.x ** 2 + path.z ** 2)
+            const centerRepulsionRadius = 50 // Start repelling from center when within 50 units
+            if (centerDist < centerRepulsionRadius && centerDist > 0) {
+              const centerRepulsionStrength = (centerRepulsionRadius - centerDist) / centerRepulsionRadius
+              avoidX += (path.x / centerDist) * centerRepulsionStrength * 8 // Push away from center
+              avoidZ += (path.z / centerDist) * centerRepulsionStrength * 8
+            }
+            
+            // Second priority: Avoid other characters
+            allCharacters.forEach((otherChar, otherIndex) => {
+              if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+              
+              const otherPath = otherChar.path
+              const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+              const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+              
+              const distX = path.x - otherX
+              const distZ = path.z - otherZ
+              const dist = Math.sqrt(distX * distX + distZ * distZ)
+              
+              // Strong avoidance when close to other characters
+              if (dist < avoidanceRadius && dist > 0) {
+                const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
+                // Strong avoidance force - turn away and move
+                avoidX += (distX / dist) * avoidStrength * 6
+                avoidZ += (distZ / dist) * avoidStrength * 6
+                
+                // If very close, override target to move away immediately
+                if (dist < minDistance) {
+                  // Calculate escape direction (away from other character)
+                  const escapeDist = 100 // Move 100 units away
+                  const newTargetX = path.x + (distX / dist) * escapeDist
+                  const newTargetZ = path.z + (distZ / dist) * escapeDist
+                  
+                  // Only update if new target is far enough from current position
+                  const newTargetDist = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
+                  if (newTargetDist >= 30) {
+                    path.targetX = newTargetX
+                    path.targetZ = newTargetZ
+                    path.changeTargetTime = 0.5 // Change target quickly
+                    
+                    // Also update dx/dz to reflect new target
+                    dx = path.targetX - path.x
+                    dz = path.targetZ - path.z
+                    distance = Math.sqrt(dx * dx + dz * dz)
+                  }
+                }
+              }
+            })
+            
+            const moveSpeed = baseMoveSpeed
+            
+            // Update character position in 3D space
+            // Move in a path that goes away from camera
+            path.angle += moveSpeed * 0.15
+            
+            // Normal movement towards target - don't reduce it
+            const moveX = (dx / Math.max(distance, 0.1)) * moveSpeed + avoidX * 0.5
+            const moveZ = (dz / Math.max(distance, 0.1)) * moveSpeed + avoidZ * 0.5
+            
+            // Calculate movement direction for rotation BEFORE moving
+            // Use the intended movement direction, not the actual movement
+            const totalMoveX = moveX
+            const totalMoveZ = moveZ
+            const moveDistance = Math.sqrt(totalMoveX * totalMoveX + totalMoveZ * totalMoveZ)
+            
+            // Rotate to face movement direction - smoother and more responsive
+            if (moveDistance > 0.001) {
+              const targetRotation = Math.atan2(totalMoveX, totalMoveZ)
+              let currentRot = group.rotation.y
+              
+              // Normalize angles
+              while (currentRot > Math.PI) currentRot -= Math.PI * 2
+              while (currentRot < -Math.PI) currentRot += Math.PI * 2
+              
+              let targetRot = targetRotation
+              while (targetRot > Math.PI) targetRot -= Math.PI * 2
+              while (targetRot < -Math.PI) targetRot += Math.PI * 2
+              
+              let diff = targetRot - currentRot
+              if (diff > Math.PI) diff -= Math.PI * 2
+              if (diff < -Math.PI) diff += Math.PI * 2
+              
+              // Clamp turn speed to prevent flip-flopping
+              const maxRotationSpeed = 0.15 // Maximum radians per frame (prevents rapid back-and-forth)
+              const baseRotationSpeed = 0.08 // Base rotation speed
+              const rotationSpeed = Math.min(maxRotationSpeed, Math.abs(diff) * 0.5 + baseRotationSpeed)
+              const rotationDelta = Math.sign(diff) * Math.min(Math.abs(diff * rotationSpeed), maxRotationSpeed)
+              group.rotation.y += rotationDelta
+            }
+            
+            // Update position
+            const forwardDistance = path.z + moveZ
+            const sideDistance = path.x + moveX
+            
+            // Calculate new position
+            const newX = sideDistance
+            const newZ = forwardDistance
+            
+            // Smoother interpolation for position - faster movement
+            const lerpFactor = 0.35 // Increased from 0.25 for faster, more responsive movement
+            group.position.x += (newX - group.position.x) * lerpFactor
+            group.position.z += (newZ - group.position.z) * lerpFactor
+            
+            // Update path reference
+            path.x = group.position.x
+            path.z = group.position.z
+            
+            // Apply animation based on state
+            if (player) {
+              if (!char.animProgress) char.animProgress = 0
+              if (!char.animSpeed) char.animSpeed = 0.87285
+              
+              char.animProgress += deltaTime * char.animSpeed // Accumulate progress with deltaTime
+              
+              // Always walking
+              try {
+                WalkingAnimationNoHeadBob(player, char.animProgress)
+              } catch (err) {
+                console.error('Animation error:', err)
+              }
+            }
+            
+            // Make nametag face camera (sprites auto-face camera, but ensure it's visible)
+            if (char.nameTag) {
+              // Sprites automatically face camera, but ensure it's positioned correctly
+              char.nameTag.position.y = 25 // Keep it well above character's head
+            }
+          })
+        }
+        
+        // Camera is FIXED - 45 degree angle from 500m away
+        // Camera positioned 500 units away at 45 degree angle looking down
+        const cameraDistance = 500
+        const angle45 = Math.PI / 4
+        skinViewer.camera.position.set(
+          Math.sin(angle45) * cameraDistance,
+          Math.cos(angle45) * cameraDistance,
+          Math.cos(angle45) * cameraDistance
+        )
+        skinViewer.camera.lookAt(0, 0, 0) // Look at origin
+      }
+      
+      skinViewer.render()
+    }
+
+    animate()
+
+    // Cleanup
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+      if (randomActionTimerRef.current) {
+        clearTimeout(randomActionTimerRef.current)
+      }
+      window.removeEventListener('resize', handleResize)
+      // Clean up blob URL if created
+      if (skinBlobUrlRef.current && skinBlobUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(skinBlobUrlRef.current)
+        skinBlobUrlRef.current = null
+      }
+      skinViewer.dispose()
+    }
+  }, [numUsers]) // Re-run when numUsers changes
+
+  // Animation transition function
+  const transitionToAnimation = useCallback((newState) => {
+    const animations = animationsRef.current
+    if (!animations || !animations[newState]) return
+
+    const currentAnim = currentAnimationRef.current
+    const targetAnim = animations[newState]
+
+    // Don't transition if already in this state
+    if (currentAnim === targetAnim) return
+
+    // Pause current animation
+    if (currentAnim) {
+      currentAnim.paused = true
+    }
+
+    // Start new animation
+    targetAnim.paused = false
+    currentAnimationRef.current = targetAnim
+    setCurrentAnimation(newState)
+  }, [])
+
+  // Handle auto-return from hit/crouch animations
+  useEffect(() => {
+    if (isPaused) return
+
+    let timeoutId = null
+
+    if (currentAnimation === ANIMATION_STATES.HIT) {
+      timeoutId = setTimeout(() => {
+        transitionToAnimation(ANIMATION_STATES.WALK)
+      }, 600) // Hit animation duration
+    }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId)
+    }
+  }, [currentAnimation, isPaused, transitionToAnimation])
+
+  // Random action trigger system
+  useEffect(() => {
+    if (isPaused) return
+
+    const scheduleRandomAction = () => {
+      // Random time between 3-8 seconds
+      const delay = Math.random() * 5000 + 3000
+      
+      randomActionTimerRef.current = setTimeout(() => {
+        if (isPausedRef.current) return
+
+        const rand = Math.random()
+        const currentState = currentAnimation
+
+        // Don't interrupt hit or crouch animations
+        if (currentState === ANIMATION_STATES.HIT) {
+          scheduleRandomAction()
+          return
+        }
+
+        // 30% chance to crouch, 20% chance to hit
+        if (rand < 0.3) {
+          transitionToAnimation(ANIMATION_STATES.WALK)
+        } else if (rand < 0.5) {
+          transitionToAnimation(ANIMATION_STATES.HIT)
+        }
+
+        scheduleRandomAction()
+      }, delay)
+    }
+
+    scheduleRandomAction()
+
+    return () => {
+      if (randomActionTimerRef.current) {
+        clearTimeout(randomActionTimerRef.current)
+      }
+    }
+  }, [isPaused, currentAnimation, transitionToAnimation])
+
+  // Auto-transition between walk/run/idle based on movement
+  // Reduced frequency and made it less random for smoother experience
+  useEffect(() => {
+    if (isPaused) return
+
+    const interval = setInterval(() => {
+      if (isPausedRef.current) return
+      
+      const currentState = currentAnimation
+      
+      // Don't interrupt hit or crouch
+      if (currentState === ANIMATION_STATES.HIT) {
+        return
+      }
+
+      // Less frequent, more predictable transitions
+      const rand = Math.random()
+      if (rand < 0.05) {
+        // 5% chance to go idle (rare)
+        if (currentState !== ANIMATION_STATES.IDLE) {
+          transitionToAnimation(ANIMATION_STATES.IDLE)
+        }
+      } else if (rand < 0.7) {
+        // 65% chance to walk (most common)
+        if (currentState === ANIMATION_STATES.IDLE) {
+          transitionToAnimation(ANIMATION_STATES.WALK)
+        }
+      } else {
+        // 30% chance to run
+        if (currentState === ANIMATION_STATES.IDLE || currentState === ANIMATION_STATES.WALK) {
+          transitionToAnimation(ANIMATION_STATES.WALK)
+        }
+      }
+    }, 5000) // Check every 5 seconds (less frequent)
+
+    return () => clearInterval(interval)
+  }, [isPaused, currentAnimation, transitionToAnimation])
+
+  // Handle pause state changes
+  useEffect(() => {
+    const animations = animationsRef.current
+    if (animations) {
+      Object.values(animations).forEach(anim => {
+        if (anim) anim.paused = isPaused
+      })
+    }
+    if (wrapperRef.current) {
+      if (isPaused) {
+        wrapperRef.current.classList.add('paused')
+      } else {
+        wrapperRef.current.classList.remove('paused')
+      }
+    }
+  }, [isPaused])
+
+  const handlePause = useCallback(() => {
+    setIsPaused(prev => !prev)
+  }, [])
+
+  const handleReset = useCallback(() => {
+    // Reset all characters
+    const characters = charactersRef.current
+    characters.forEach((char, index) => {
+      char.path.x = 0
+      char.path.z = 5 + (index % 3) * 3
+      char.path.angle = (index / characters.length) * Math.PI * 2
+      char.group.position.set(char.path.x, 0, char.path.z)
+      char.group.rotation.y = char.path.angle
+    })
+    if (skinViewerRef.current) {
+      const player = skinViewerRef.current.playerObject
+      player.position.set(0, 0, 5) // Start closer to camera
+      player.rotation.y = 0
+      // Reset camera to fixed position - 45 degree angle from 500m away
+      const cameraDistance = 500
+      const angle45 = Math.PI / 4
+      skinViewerRef.current.camera.position.set(
+        Math.sin(angle45) * cameraDistance,
+        Math.cos(angle45) * cameraDistance,
+        Math.cos(angle45) * cameraDistance
+      )
+      skinViewerRef.current.camera.lookAt(0, 0, 0)
+      skinViewerRef.current.zoom = 0.0000002 // Zoomed out 5x more
+      skinViewerRef.current.camera.fov = 120
+    }
+    if (controlsRef.current) {
+      controlsRef.current.reset()
+    }
+  }, [])
+
+  return (
+    <>
+      <Starfield />
+      <div 
+        ref={wrapperRef}
+        className="canvas-wrapper"
+        key={animationKey}
+      >
+        <canvas ref={canvasRef} id="skinCanvas" />
+      </div>
+      <div className="controls">
+        <div className="slider-control">
+          <label htmlFor="userCount">Number of Users: {numUsers}</label>
+          <input
+            type="range"
+            id="userCount"
+            min="1"
+            max="100"
+            value={numUsers}
+            onChange={(e) => {
+              const newCount = parseInt(e.target.value)
+              setNumUsers(newCount)
+              // Trigger re-render to update characters
+              setAnimationKey(prev => prev + 1)
+            }}
+          />
+        </div>
+        <button onClick={handlePause}>
+          {isPaused ? 'Resume' : 'Pause'}
+        </button>
+        <button onClick={handleReset}>
+          Reset Position
+        </button>
+      </div>
+    </>
+  )
+}
+
+export default SkinViewerComponent
+
