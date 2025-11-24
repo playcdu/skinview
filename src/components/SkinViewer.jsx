@@ -185,6 +185,50 @@ const WalkingAnimationNoHeadBob = (player, progress) => {
 }
 
 // Wave animation - character waves at camera
+// Flying animation - for thrown characters
+const FlyingAnimation = (player, progress) => {
+  const skin = player.skin
+  
+  // Body rotation finishes in 0.5s
+  // Elytra expansion finishes in 3.3s
+  const t = progress > 0 ? progress * 20 : 0
+  const startProgress = Math.min(Math.max((t * t) / 100, 0), 1)
+  
+  // Rotate body forward (flying pose)
+  player.rotation.x = (startProgress * Math.PI) / 2
+  
+  // Head rotation
+  skin.head.rotation.x = startProgress > 0.5 ? Math.PI / 4 - player.rotation.x : 0
+  
+  // Arm rotation (spread out like wings)
+  const basicArmRotationZ = Math.PI * 0.25 * startProgress
+  skin.leftArm.rotation.z = basicArmRotationZ
+  skin.rightArm.rotation.z = -basicArmRotationZ
+  
+  // Elytra rotation (if elytra exists)
+  if (player.elytra) {
+    const elytraRotationX = 0.34906584
+    const elytraRotationZ = Math.PI / 2
+    const interpolation = Math.pow(0.9, t)
+    if (player.elytra.leftWing) {
+      player.elytra.leftWing.rotation.x = elytraRotationX + interpolation * (0.2617994 - elytraRotationX)
+      player.elytra.leftWing.rotation.z = elytraRotationZ + interpolation * (0.2617994 - elytraRotationZ)
+    }
+    if (player.elytra.updateRightWing) {
+      player.elytra.updateRightWing()
+    }
+  }
+  
+  // Keep legs still
+  skin.leftLeg.rotation.x = 0
+  skin.rightLeg.rotation.x = 0
+  
+  // Disable cape if exists
+  if (player.cape) {
+    player.cape.visible = false
+  }
+}
+
 const WaveAnimation = (player, progress, whichArm = 'left') => {
   const skin = player.skin
   const t = progress * 2 * Math.PI * 0.5
@@ -481,17 +525,19 @@ function SkinViewerComponent() {
           raycaster.ray.intersectPlane(plane, intersectionPoint)
           if (intersectionPoint) {
             lastDragPosRef.current = { x: intersectionPoint.x, z: intersectionPoint.z }
+          } else {
+            // Fallback to character's current position
+            lastDragPosRef.current = { x: hitChar.path.x, z: hitChar.path.z }
           }
+        } else {
+          // Fallback to character's current position
+          lastDragPosRef.current = { x: hitChar.path.x, z: hitChar.path.z }
         }
         lastDragTimeRef.current = Date.now()
         dragVelocityRef.current = { x: 0, z: 0 }
         hitChar.throwVelocity = { x: 0, z: 0, y: 0 } // Initialize throw velocity
         hitChar.isThrown = false // Track if character is being thrown
         hitChar.throwRotation = { x: 0, z: 0 } // Tilt rotation during throw
-        // Initialize drag tracking
-        lastDragPosRef.current = { x: intersectionPoint.x, z: intersectionPoint.z }
-        lastDragTimeRef.current = Date.now()
-        dragVelocityRef.current = { x: 0, z: 0 }
       }
     }
     
@@ -625,17 +671,31 @@ function SkinViewerComponent() {
           draggedCharacter.throwVelocity = {
             x: dragVelocityRef.current.x * 1.5, // Scale up for more visible effect
             z: dragVelocityRef.current.z * 1.5,
-            y: Math.min(throwSpeed * 0.5, 35) // Upward velocity based on throw speed
+            y: Math.min(throwSpeed * 0.2, 15) // Reduced upward velocity - lower height (was 0.5, 35)
           }
           draggedCharacter.dropVelocity = draggedCharacter.throwVelocity.y
           draggedCharacter.animationState = ANIMATION_STATES.IDLE // Idle while flying
+          
+          // Face the direction they're being thrown
+          const throwDirection = Math.atan2(draggedCharacter.throwVelocity.x, draggedCharacter.throwVelocity.z)
+          draggedCharacter.group.rotation.y = throwDirection
+          
           console.log(`🚀 Thrown ${draggedCharacter.username} with speed ${throwSpeed.toFixed(2)}, velocity=(${draggedCharacter.throwVelocity.x.toFixed(2)}, ${draggedCharacter.throwVelocity.z.toFixed(2)}, ${draggedCharacter.throwVelocity.y.toFixed(2)})`)
         } else {
-          // Normal drop - no throw
-          draggedCharacter.isFloating = false
-          draggedCharacter.dropVelocity = 0 // Start dropping
-          draggedCharacter.animationState = ANIMATION_STATES.WALK // Return to walking
-          console.log(`📦 Dropped ${draggedCharacter.username} (speed ${throwSpeed.toFixed(2)} was below threshold ${throwThreshold})`)
+          // Gentle drop - no throw, just gently lower to ground
+          if (draggedCharacter.group.position.y > 0) {
+            // Character is floating, gently drop them
+            draggedCharacter.isFloating = true
+            draggedCharacter.dropVelocity = -2.0 // Gentle downward velocity (much slower than gravity)
+            draggedCharacter.animationState = ANIMATION_STATES.IDLE // Idle while gently dropping
+            console.log(`📦 Gently dropping ${draggedCharacter.username} (speed ${throwSpeed.toFixed(2)} was below threshold ${throwThreshold})`)
+          } else {
+            // Already on ground, just reset
+            draggedCharacter.isFloating = false
+            draggedCharacter.dropVelocity = undefined
+            draggedCharacter.animationState = ANIMATION_STATES.WALK // Return to walking
+            console.log(`📦 Dropped ${draggedCharacter.username} (already on ground)`)
+          }
         }
         
         // Mark that this was a drag release to prevent click handler from firing
@@ -1669,6 +1729,169 @@ function SkinViewerComponent() {
             const group = char.group
             const player = char.player
             
+            // Handle death sequence FIRST (for all dying characters - thrown or hit)
+            if (char.isDying) {
+              char.deathTimer -= deltaTime
+              
+              // Keep character stopped (no movement during death)
+              if (char.throwVelocity) {
+                char.throwVelocity.x = 0
+                char.throwVelocity.z = 0
+              }
+              if (char.dropVelocity !== undefined) {
+                char.dropVelocity = 0
+              }
+              
+              // Stop pathing and movement completely
+              char.path.targetX = char.path.x
+              char.path.targetZ = char.path.z
+              char.path.changeTargetTime = Infinity
+              group.position.x = char.path.x // Lock position
+              group.position.z = char.path.z
+              
+              // Stop any other movement states
+              char.shouldRunAway = false
+              char.runAwayTimer = undefined
+              char.runAwayTarget = undefined
+              char.runAwayFrom = undefined
+              char.hitTargetPlayer = undefined
+              char.isHitting = false
+              
+              // Smooth rotation to fall over
+              if (char.fallRotation) {
+                const rotationSpeed = 0.15 // Rotation speed per frame
+                const targetX = char.fallRotation.targetX
+                const targetZ = char.fallRotation.targetZ
+                let currentX = char.fallRotation.currentX
+                let currentZ = char.fallRotation.currentZ
+                
+                // Smoothly rotate towards target
+                const diffX = targetX - currentX
+                const diffZ = targetZ - currentZ
+                currentX += diffX * rotationSpeed
+                currentZ += diffZ * rotationSpeed
+                
+                // Update rotation
+                group.rotation.x = currentX
+                group.rotation.z = currentZ
+                
+                // Update stored values
+                char.fallRotation.currentX = currentX
+                char.fallRotation.currentZ = currentZ
+                
+                // If close enough to target, snap to it
+                if (Math.abs(diffX) < 0.01 && Math.abs(diffZ) < 0.01) {
+                  group.rotation.x = targetX
+                  group.rotation.z = targetZ
+                  char.fallRotation = undefined // Clear after reaching target
+                }
+              } else {
+                // Initialize fall rotation if not already set
+                char.fallRotation = {
+                  targetX: Math.PI / 2, // Fall forward
+                  targetZ: (Math.random() - 0.5) * 0.3, // Slight random tilt
+                  currentX: group.rotation.x || 0,
+                  currentZ: group.rotation.z || 0
+                }
+              }
+              
+              // Fade out
+              const fadeProgress = 1 - (char.deathTimer / 1.2)
+              player.traverse((obj) => {
+                if (obj.material) {
+                  const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                  materials.forEach((mat) => {
+                    mat.transparent = true
+                    mat.opacity = 1 - fadeProgress
+                  })
+                }
+              })
+              
+              // Fade nametag
+              if (char.nameTag && char.nameTag.material) {
+                char.nameTag.material.opacity = 1 - fadeProgress
+              }
+              
+              // Respawn when fade complete
+              if (char.deathTimer <= 0) {
+                // Respawn at new random location
+                const spacing = 120
+                const angle = Math.random() * Math.PI * 2
+                const radius = 50 + Math.random() * 150
+                const newX = Math.cos(angle) * radius + (Math.random() - 0.5) * spacing * 0.5
+                const newZ = Math.sin(angle) * radius + (Math.random() - 0.5) * spacing * 0.5
+                
+                // Reset position
+                path.x = newX
+                path.z = newZ
+                group.position.set(newX, 0, newZ)
+                group.rotation.y = Math.random() * Math.PI * 2
+                
+                // Reset all states
+                char.isThrown = false
+                char.isFloating = false
+                char.isDying = false
+                char.throwVelocity = null
+                char.dropVelocity = undefined
+                char.isHit = false
+                char.hitTimer = undefined
+                char.animationState = ANIMATION_STATES.WAVE // Wave on respawn
+                char.waveDuration = 2.0 + Math.random() * 1.0
+                char.waveArm = Math.random() > 0.5 ? 'left' : 'right'
+                char.animProgress = 0
+                
+                // Reset pathing
+                char.path.changeTargetTime = Date.now() + Math.random() * 2000 + 1000
+                
+                // Reset all rotations (including fall-over rotation)
+                group.rotation.x = 0
+                group.rotation.z = 0
+                char.throwRotation = { x: 0, z: 0 }
+                char.fallRotation = undefined // Clear fall rotation
+                if (player.rotation) {
+                  player.rotation.x = 0
+                  player.rotation.z = 0
+                }
+                if (player.skin && player.skin.head) {
+                  player.skin.head.rotation.x = 0
+                }
+                if (player.skin && player.skin.leftArm) {
+                  player.skin.leftArm.rotation.z = 0
+                }
+                if (player.skin && player.skin.rightArm) {
+                  player.skin.rightArm.rotation.z = 0
+                }
+                
+                // Restore materials (remove red tint and restore opacity)
+                player.traverse((obj) => {
+                  if (obj.material) {
+                    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                    materials.forEach((mat) => {
+                      if (mat.color) {
+                        mat.color.setRGB(1.0, 1.0, 1.0) // Reset to white
+                      }
+                      mat.transparent = false
+                      mat.opacity = 1.0
+                      mat.needsUpdate = true
+                    })
+                  }
+                })
+                
+                // Restore nametag
+                if (char.nameTag && char.nameTag.material) {
+                  char.nameTag.material.opacity = 0.5 // Original nametag opacity
+                }
+                
+                console.log(`✨ ${char.username} respawned at (${newX.toFixed(1)}, ${newZ.toFixed(1)})`)
+                
+                // Skip rest of logic this frame
+                return
+              }
+              
+              // Skip rest of logic while dying
+              return
+            }
+            
             // Skip normal movement logic if in formation mode (handled above)
             if (char.formationMode) {
               // Check if this is a cluster character (should form up) or non-cluster (should despawn)
@@ -1919,33 +2142,229 @@ function SkinViewerComponent() {
             
             // Handle thrown characters FIRST (before formation mode check)
             if (char.isThrown && char.throwVelocity) {
-              // Apply horizontal throw velocity
-              const moveX = char.throwVelocity.x * deltaTime
-              const moveZ = char.throwVelocity.z * deltaTime
-              path.x += moveX
-              path.z += moveZ
-              group.position.x = path.x
-              group.position.z = path.z
+              // Check if character hit screen edge (death condition)
+              const distFromCenter = Math.sqrt(path.x ** 2 + path.z ** 2)
+              const screenEdgeDistance = 500 // Screen edge distance (increased from 450)
               
-              // Apply vertical velocity
+              if (distFromCenter > screenEdgeDistance && !char.isDying) {
+                // Character hit screen edge - start death sequence
+                char.isDying = true
+                char.deathTimer = 1.2 // Fade out over 1.2 seconds (increased from 0.3)
+                char.isHit = true
+                char.hitTimer = 1.2 // Red overlay duration (matches fade out)
+                
+                // Stop all movement immediately
+                char.throwVelocity.x = 0
+                char.throwVelocity.z = 0
+                char.dropVelocity = 0
+                
+                // Apply red overlay
+                const redTint = { r: 1.5, g: 0.5, b: 0.5 }
+                player.traverse((obj) => {
+                  if (obj.material) {
+                    const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                    materials.forEach((mat) => {
+                      if (mat.color) {
+                        mat.color.setRGB(
+                          Math.min(mat.color.r * redTint.r, 1.0),
+                          Math.min(mat.color.g * redTint.g, 1.0),
+                          Math.min(mat.color.b * redTint.b, 1.0)
+                        )
+                        mat.needsUpdate = true
+                      }
+                    })
+                  }
+                })
+                
+                console.log(`💀 ${char.username} hit screen edge and died!`)
+              } else if (!char.isDying) {
+                // Normal flying behavior (not dying)
+                // Check for collisions with other characters while flying
+                // Use infinite vertical collision (like a pole) - only check horizontal distance
+                const horizontalCollisionRadius = 8.0 // Horizontal collision radius
+                const thrownCharPos = { 
+                  x: path.x, 
+                  z: path.z
+                }
+                
+                allCharacters.forEach((otherChar) => {
+                  // Skip self, already dying characters, and other thrown characters
+                  if (otherChar === char || otherChar.isDying || otherChar.isThrown) return
+                  
+                  // Skip characters in formation mode
+                  if (otherChar.formationMode) return
+                  
+                  // Safety check
+                  if (!otherChar.path || !otherChar.group) return
+                  
+                  const otherPath = otherChar.path
+                  
+                  // Calculate horizontal distance only (infinite vertical collision - like a pole)
+                  const dx = thrownCharPos.x - otherPath.x
+                  const dz = thrownCharPos.z - otherPath.z
+                  const horizontalDist = Math.sqrt(dx * dx + dz * dz)
+                  
+                  // Collision detected if within horizontal radius (ignoring vertical distance completely)
+                  if (horizontalDist < horizontalCollisionRadius && !otherChar.isDying) {
+                    // Hit character dies
+                    otherChar.isDying = true
+                    otherChar.deathTimer = 1.2 // Fade out over 1.2 seconds
+                    otherChar.isHit = true
+                    otherChar.hitTimer = 1.2
+                    
+                    // Stop the hit character's movement immediately
+                    otherChar.path.targetX = otherPath.x
+                    otherChar.path.targetZ = otherPath.z
+                    otherChar.path.x = otherPath.x // Stop at current position
+                    otherChar.path.z = otherPath.z
+                    otherChar.path.changeTargetTime = Infinity // Prevent new path
+                    otherChar.animationState = ANIMATION_STATES.IDLE
+                    otherChar.group.position.x = otherPath.x // Stop movement immediately
+                    otherChar.group.position.z = otherPath.z
+                    
+                    // Stop any running away or other movement states
+                    otherChar.shouldRunAway = false
+                    otherChar.runAwayTimer = undefined
+                    otherChar.runAwayTarget = undefined
+                    otherChar.runAwayFrom = undefined
+                    otherChar.hitTargetPlayer = undefined
+                    otherChar.isHitting = false
+                    
+                    // Apply red overlay to hit character
+                    const redTint = { r: 1.5, g: 0.5, b: 0.5 }
+                    otherChar.player.traverse((obj) => {
+                      if (obj.material) {
+                        const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                        materials.forEach((mat) => {
+                          if (mat.color) {
+                            mat.color.setRGB(
+                              Math.min(mat.color.r * redTint.r, 1.0),
+                              Math.min(mat.color.g * redTint.g, 1.0),
+                              Math.min(mat.color.b * redTint.b, 1.0)
+                            )
+                            mat.needsUpdate = true
+                          }
+                        })
+                      }
+                    })
+                    
+                    // Initialize smooth rotation for falling over
+                    otherChar.fallRotation = {
+                      targetX: Math.PI / 2, // Fall forward
+                      targetZ: (Math.random() - 0.5) * 0.3, // Slight random tilt
+                      currentX: otherChar.group.rotation.x || 0,
+                      currentZ: otherChar.group.rotation.z || 0
+                    }
+                    
+                    console.log(`💥 ${char.username} hit ${otherChar.username} while flying!`)
+                  }
+                })
+                
+                // Apply horizontal throw velocity
+                const moveX = char.throwVelocity.x * deltaTime
+                const moveZ = char.throwVelocity.z * deltaTime
+                path.x += moveX
+                path.z += moveZ
+                group.position.x = path.x
+                group.position.z = path.z
+                
+                // Apply vertical velocity (but keep height lower)
+                group.position.y += char.dropVelocity * deltaTime
+                
+                // Clamp maximum height to keep characters lower
+                const maxHeight = 8.0 // Maximum height while flying (reduced from unlimited)
+                if (group.position.y > maxHeight) {
+                  group.position.y = maxHeight
+                  char.dropVelocity = 0 // Stop upward movement at max height
+                }
+                
+                // Apply gravity
+                char.dropVelocity -= 9.8 * deltaTime // Gravity (units per second squared)
+                
+                // Apply air resistance to horizontal velocity (gradual slowdown)
+                char.throwVelocity.x *= (1 - deltaTime * 2) // Slow down over time
+                char.throwVelocity.z *= (1 - deltaTime * 2)
+                
+                // Stop horizontal movement when velocity is very small
+                if (Math.abs(char.throwVelocity.x) < 0.1) char.throwVelocity.x = 0
+                if (Math.abs(char.throwVelocity.z) < 0.1) char.throwVelocity.z = 0
+                
+                // Keep rotation neutral while flying (no tilt)
+                group.rotation.x = 0
+                group.rotation.z = 0
+                
+                // Face the direction of movement while flying
+                const horizontalSpeed = Math.sqrt(char.throwVelocity.x ** 2 + char.throwVelocity.z ** 2)
+                if (horizontalSpeed > 0.1) {
+                  const flyDirection = Math.atan2(char.throwVelocity.x, char.throwVelocity.z)
+                  let currentRot = group.rotation.y
+                  // Normalize angles
+                  while (currentRot > Math.PI) currentRot -= Math.PI * 2
+                  while (currentRot < -Math.PI) currentRot += Math.PI * 2
+                  let targetRot = flyDirection
+                  while (targetRot > Math.PI) targetRot -= Math.PI * 2
+                  while (targetRot < -Math.PI) targetRot += Math.PI * 2
+                  let diff = targetRot - currentRot
+                  if (diff > Math.PI) diff -= Math.PI * 2
+                  if (diff < -Math.PI) diff += Math.PI * 2
+                  // Smooth rotation to face throw direction
+                  const rotationSpeed = 0.3
+                  group.rotation.y += diff * rotationSpeed
+                }
+                
+                // Play flying animation while thrown
+                char.animProgress += deltaTime * char.animSpeed
+                try {
+                  FlyingAnimation(player, char.animProgress)
+                } catch (err) {
+                  console.error('Animation error:', err)
+                }
+              }
+              
+              // Stop when character hits ground (only if not dying)
+              if (!char.isDying && group.position.y <= 0) {
+                group.position.y = 0
+                char.isThrown = false
+                char.isFloating = false
+                char.throwVelocity = null
+                char.dropVelocity = undefined
+                char.animationState = ANIMATION_STATES.WALK // Return to walking
+                // Reset all rotations to upright position
+                group.rotation.x = 0
+                group.rotation.z = 0
+                char.throwRotation = { x: 0, z: 0 }
+                // Reset player body rotation (from flying animation)
+                if (player.rotation) {
+                  player.rotation.x = 0
+                  player.rotation.z = 0
+                }
+                // Reset head rotation
+                if (player.skin && player.skin.head) {
+                  player.skin.head.rotation.x = 0
+                }
+                // Reset arm rotations
+                if (player.skin && player.skin.leftArm) {
+                  player.skin.leftArm.rotation.z = 0
+                }
+                if (player.skin && player.skin.rightArm) {
+                  player.skin.rightArm.rotation.z = 0
+                }
+                console.log(`🏁 ${char.username} landed after throw`)
+              }
+              
+              // Skip rest of normal logic while thrown
+              return
+            }
+            
+            // Handle gentle drop (not thrown, but was floating)
+            if (char.isFloating && char.dropVelocity !== undefined && !char.isThrown && char.dropVelocity < 0) {
+              // Apply gentle downward velocity
               group.position.y += char.dropVelocity * deltaTime
               
-              // Apply gravity
-              char.dropVelocity -= 9.8 * deltaTime // Gravity (units per second squared)
+              // Gentle gravity (much lighter than thrown gravity)
+              char.dropVelocity -= 2.0 * deltaTime // Light gravity
               
-              // Apply air resistance to horizontal velocity (gradual slowdown)
-              char.throwVelocity.x *= (1 - deltaTime * 2) // Slow down over time
-              char.throwVelocity.z *= (1 - deltaTime * 2)
-              
-              // Stop horizontal movement when velocity is very small
-              if (Math.abs(char.throwVelocity.x) < 0.1) char.throwVelocity.x = 0
-              if (Math.abs(char.throwVelocity.z) < 0.1) char.throwVelocity.z = 0
-              
-              // Keep rotation neutral while flying (no tilt)
-              group.rotation.x = 0
-              group.rotation.z = 0
-              
-              // Play idle animation while flying
+              // Play idle animation while gently dropping
               char.animProgress += deltaTime * char.animSpeed
               try {
                 IdleAnimation(player, char.animProgress)
@@ -1956,19 +2375,13 @@ function SkinViewerComponent() {
               // Stop when character hits ground
               if (group.position.y <= 0) {
                 group.position.y = 0
-                char.isThrown = false
                 char.isFloating = false
-                char.throwVelocity = null
                 char.dropVelocity = undefined
                 char.animationState = ANIMATION_STATES.WALK // Return to walking
-                // Reset rotation
-                group.rotation.x = 0
-                group.rotation.z = 0
-                char.throwRotation = { x: 0, z: 0 }
-                console.log(`🏁 ${char.username} landed after throw`)
+                console.log(`🏁 ${char.username} gently landed`)
               }
               
-              // Skip rest of normal logic while thrown
+              // Skip rest of normal logic while gently dropping
               return
             }
             
