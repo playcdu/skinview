@@ -451,6 +451,7 @@
         top: 10px;
         font-size: 12px;
         padding: 10px 16px;
+        display: none;
     }
 }
 
