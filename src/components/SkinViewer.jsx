@@ -1173,9 +1173,14 @@ function SkinViewerComponent() {
     
     // Function to add chat message (with deduplication)
     function addChatMessage(username, type) {
-      const message = type === 'login' 
-        ? `${username} Logged in!`
-        : `${username} Logged out!`
+      let message = '';
+      if (type === 'login') {
+        message = `${username} Logged in!`;
+      } else if (type === 'logout') {
+        message = `${username} Logged out!`;
+      } else if (type === 'death') {
+        message = `${username} was slain!`;
+      }
       
       setChatMessages(prev => {
         // Check if this exact message was added recently (within last 2 seconds)
@@ -3702,6 +3707,30 @@ function SkinViewerComponent() {
                 char.isHit = false
                 char.hitTimer = undefined
               }
+            } else if (char.isBeingHit && char.hitTimer !== undefined && !char.wasHitByPlayer) {
+                // This handles the "turn red when clicked" logic which was previously missing the turn-off logic
+                // because it shares the hitTimer but uses isBeingHit for player-to-player hits
+                // We need to make sure we clear the red tint for user clicks too
+                 char.hitTimer -= deltaTime
+                  if (char.hitTimer <= 0) {
+                    // Remove red overlay
+                    char.player.traverse((obj) => {
+                      if (obj.material) {
+                        const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                        materials.forEach(mat => {
+                          if (mat.color) {
+                            // Reset to original color (divide by the tint we applied)
+                            mat.color.r /= 1.5
+                            mat.color.g /= 0.5
+                            mat.color.b /= 0.5
+                            mat.needsUpdate = true
+                          }
+                        })
+                      }
+                    })
+                    char.isBeingHit = false
+                    char.hitTimer = undefined
+                  }
             }
             
             // Apply animation based on state
