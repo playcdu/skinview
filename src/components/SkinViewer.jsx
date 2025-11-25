@@ -911,9 +911,14 @@ function SkinViewerComponent() {
           const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
           materials.forEach(mat => {
             if (mat.color) {
-              mat.color.r *= redTint.r
-              mat.color.g *= redTint.g
-              mat.color.b *= redTint.b
+              // Store original color if not already stored
+              if (!mat.originalColor) {
+                mat.originalColor = mat.color.clone()
+              }
+              // Apply tint based on original color to prevent drift
+              mat.color.r = mat.originalColor.r * redTint.r
+              mat.color.g = mat.originalColor.g * redTint.g
+              mat.color.b = mat.originalColor.b * redTint.b
               mat.needsUpdate = true
             }
           })
@@ -2569,6 +2574,10 @@ function SkinViewerComponent() {
                     if (otherChar.animationState === ANIMATION_STATES.RUN) return // Don't target running players
                     if (otherChar.isDying) return // Don't target dying players
                     
+                    // Check if this player is already being targeted by someone else
+                    const isAlreadyTargeted = allCharacters.some(c => c !== char && c.hitTargetPlayer === otherChar)
+                    if (isAlreadyTargeted && currentAggressiveness < 0.9) return // Only allow swarming at max aggressiveness
+                    
                     const otherPath = otherChar.path
                     const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
                     const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
@@ -2649,10 +2658,15 @@ function SkinViewerComponent() {
                     if (obj.material) {
                       const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                       materials.forEach(mat => {
-                        if (mat.color && !targetChar.isBeingHit) { // Only apply if not already hit
-                          mat.color.r *= redTint.r
-                          mat.color.g *= redTint.g
-                          mat.color.b *= redTint.b
+                        if (mat.color) {
+                          // Store original color if not already stored
+                          if (!mat.originalColor) {
+                            mat.originalColor = mat.color.clone()
+                          }
+                          // Apply tint based on original color to prevent drift
+                          mat.color.r = mat.originalColor.r * redTint.r
+                          mat.color.g = mat.originalColor.g * redTint.g
+                          mat.color.b = mat.originalColor.b * redTint.b
                           mat.needsUpdate = true
                         }
                       })
@@ -3565,11 +3579,10 @@ function SkinViewerComponent() {
                   if (obj.material) {
                     const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                     materials.forEach(mat => {
-                      if (mat.color) {
-                        // Reset to original color (divide by the tint we applied)
-                        mat.color.r /= 1.5
-                        mat.color.g /= 0.5
-                        mat.color.b /= 0.5
+                      if (mat.color && mat.originalColor) {
+                        // Restore original color
+                        mat.color.copy(mat.originalColor)
+                        delete mat.originalColor // Clear stored color
                         mat.needsUpdate = true
                       }
                     })
@@ -3636,6 +3649,11 @@ function SkinViewerComponent() {
             let newZ = path.z
             // isBeingDragged is already declared above in the animation state logic
             
+            // Safety check for RUN state without target
+            if (char.animationState === ANIMATION_STATES.RUN && !char.runAwayTarget && !char.knockbackVelocity) {
+                char.animationState = ANIMATION_STATES.WALK
+            }
+
             // Handle running away movement (faster than normal walking)
             if (char.animationState === ANIMATION_STATES.RUN && char.runAwayTarget && !char.knockbackVelocity) {
               // Move towards run away target at faster speed
@@ -3694,11 +3712,10 @@ function SkinViewerComponent() {
                   if (obj.material) {
                     const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                     materials.forEach(mat => {
-                      if (mat.color) {
-                        // Reset to original color (divide by the tint we applied)
-                        mat.color.r /= 1.5
-                        mat.color.g /= 0.5
-                        mat.color.b /= 0.5
+                      if (mat.color && mat.originalColor) {
+                        // Restore original color
+                        mat.color.copy(mat.originalColor)
+                        delete mat.originalColor // Clear stored color
                         mat.needsUpdate = true
                       }
                     })
@@ -3718,11 +3735,10 @@ function SkinViewerComponent() {
                       if (obj.material) {
                         const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                         materials.forEach(mat => {
-                          if (mat.color) {
-                            // Reset to original color (divide by the tint we applied)
-                            mat.color.r /= 1.5
-                            mat.color.g /= 0.5
-                            mat.color.b /= 0.5
+                          if (mat.color && mat.originalColor) {
+                            // Restore original color
+                            mat.color.copy(mat.originalColor)
+                            delete mat.originalColor // Clear stored color
                             mat.needsUpdate = true
                           }
                         })
