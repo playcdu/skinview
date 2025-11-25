@@ -444,8 +444,14 @@ function SkinViewerComponent() {
     // Helper function to find character closest to mouse
     function findCharacterUnderMouse(event) {
       const rect = canvas.getBoundingClientRect()
-      const mouseX = event.clientX - rect.left
-      const mouseY = event.clientY - rect.top
+      // Handle both mouse and touch events
+      const clientX = event.clientX !== undefined ? event.clientX : (event.touches?.[0]?.clientX ?? event.changedTouches?.[0]?.clientX)
+      const clientY = event.clientY !== undefined ? event.clientY : (event.touches?.[0]?.clientY ?? event.changedTouches?.[0]?.clientY)
+      
+      if (clientX === undefined || clientY === undefined) return null
+      
+      const mouseX = clientX - rect.left
+      const mouseY = clientY - rect.top
       
       const allCharacters = charactersRef.current || []
       let closestChar = null
@@ -903,9 +909,10 @@ function SkinViewerComponent() {
     canvas.addEventListener('click', handleClick, { capture: true })
     
     // Touch events for mobile
-    canvas.addEventListener('touchstart', handleMouseDown, { capture: true })
-    canvas.addEventListener('touchmove', handleDragMove, { capture: true })
-    canvas.addEventListener('touchend', handleMouseUp, { capture: true })
+    canvas.addEventListener('touchstart', handleMouseDown, { capture: true, passive: false })
+    canvas.addEventListener('touchmove', handleDragMove, { capture: true, passive: false })
+    canvas.addEventListener('touchmove', handleMouseMove, { capture: true, passive: false })
+    canvas.addEventListener('touchend', handleMouseUp, { capture: true, passive: false })
     
     // Also add to wrapper as backup
     if (wrapper) {
@@ -984,7 +991,7 @@ function SkinViewerComponent() {
                   
                   // Create nametag
                   const nameTag = new NameTagObject(username, {
-                    font: '56px Arial',
+                    font: '56px Minecraft',
                     height: 6.5,
                     textStyle: 'white',
                     backgroundStyle: 'rgba(0,0,0,.7)',
@@ -1248,7 +1255,7 @@ function SkinViewerComponent() {
         
         // Create nametag for original character using username from API
         const originalNameTag = new NameTagObject(users[0].minecraft_username || 'Player1', {
-          font: '56px Arial', // Slightly smaller font
+          font: '56px Minecraft', // Slightly smaller font
           height: 6.5, // Smaller height
           textStyle: 'white',
           backgroundStyle: 'rgba(0,0,0,.7)',
@@ -1398,7 +1405,7 @@ function SkinViewerComponent() {
               
               // Create nametag for this character using username from API
               const nameTag = new NameTagObject(user.minecraft_username || `Player${i + 1}`, {
-                font: '56px Arial', // Slightly smaller font
+                font: '56px Minecraft', // Slightly smaller font
                 height: 6.5, // Smaller height
                 textStyle: 'white',
                 backgroundStyle: 'rgba(0,0,0,.7)',
