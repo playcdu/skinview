@@ -310,6 +310,8 @@ function SkinViewerComponent() {
   const lastDragPosRef = useRef({ x: 0, z: 0 }) // Last drag position for velocity calculation
   const dragVelocityRef = useRef({ x: 0, z: 0 }) // Current drag velocity
   const lastDragTimeRef = useRef(0) // Last drag time for velocity calculation
+  const touchStartPosRef = useRef({ x: 0, y: 0 }) // Touch start position for tap detection
+  const touchStartTimeRef = useRef(0) // Touch start time for tap detection
   const targetFPS = 24
   const frameInterval = 1000 / targetFPS // ~41.67ms per frame at 24fps
   
@@ -430,11 +432,24 @@ function SkinViewerComponent() {
     skinViewer.zoom = 0.0000002 // Zoomed out 5x more (0.000001 / 5 = 0.0000002)
     skinViewer.camera.fov = 120 // Maximum field of view
     
-    // Disable orbit controls - camera is fixed
+    // Detect if device is mobile
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 
+                     ('ontouchstart' in window) || 
+                     (navigator.maxTouchPoints > 0)
+    
+    // Create orbit controls - camera rotation and pan disabled, zoom enabled conditionally
     const control = skinview3d.createOrbitControls(skinViewer)
     control.enableRotate = false
-    control.enableZoom = false // Fixed zoom
     control.enablePan = false
+    
+    // Enable zoom for mobile (pinch) and PC (scroll wheel)
+    control.enableZoom = true
+    control.minDistance = 100 // Minimum zoom distance
+    control.maxDistance = 2000 // Maximum zoom distance
+    
+    // Set zoom speed
+    control.zoomSpeed = isMobile ? 0.5 : 1.0 // Slower zoom on mobile for better control
+    
     controlsRef.current = control
     
     // Create raycaster for click detection
@@ -519,11 +534,26 @@ function SkinViewerComponent() {
     
     // Handle mouse down / touch start - start drag or prepare for click
     const handleMouseDown = (event) => {
-      event.preventDefault()
-      event.stopPropagation()
+      // Skip if multi-touch (pinch zoom gesture)
+      if (event.touches && event.touches.length > 1) {
+        return // Let OrbitControls handle pinch zoom
+      }
+      
+      // Store touch start position and time for tap detection
+      const rect = canvas.getBoundingClientRect()
+      const clientX = event.clientX !== undefined ? event.clientX : event.touches?.[0]?.clientX
+      const clientY = event.clientY !== undefined ? event.clientY : event.touches?.[0]?.clientY
+      
+      if (clientX !== undefined && clientY !== undefined) {
+        touchStartPosRef.current = { x: clientX, y: clientY }
+        touchStartTimeRef.current = Date.now()
+      }
       
       const hitChar = findCharacterUnderMouse(event)
       if (hitChar) {
+        // Only prevent default if we're interacting with a character
+        event.preventDefault()
+        event.stopPropagation()
         draggedCharRef.current = hitChar
         isDraggingRef.current = false
         dragStartTimeRef.current = Date.now()
@@ -539,9 +569,6 @@ function SkinViewerComponent() {
         hitChar.isThrown = false // Track if character is being thrown
         hitChar.throwRotation = { x: 0, z: 0 } // Tilt rotation during drag/throw
         // Initialize drag tracking
-        const rect = canvas.getBoundingClientRect()
-        const clientX = event.clientX !== undefined ? event.clientX : event.touches?.[0]?.clientX
-        const clientY = event.clientY !== undefined ? event.clientY : event.touches?.[0]?.clientY
         if (clientX !== undefined && clientY !== undefined) {
           const mouse = new Vector2()
           mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1
@@ -573,13 +600,30 @@ function SkinViewerComponent() {
     const handleDragMove = (event) => {
       if (!draggedCharRef.current) return
       
+      // Skip if multi-touch (pinch zoom gesture)
+      if (event.touches && event.touches.length > 1) {
+        // Release drag when pinch starts
+        draggedCharRef.current = null
+        isDraggingRef.current = false
+        return // Let OrbitControls handle pinch zoom
+      }
+      
       const rect = canvas.getBoundingClientRect()
       const clientX = event.clientX !== undefined ? event.clientX : event.touches?.[0]?.clientX
       const clientY = event.clientY !== undefined ? event.clientY : event.touches?.[0]?.clientY
       
       if (clientX === undefined || clientY === undefined) return
       
-      // Check if we've moved enough to consider it a drag
+      // Check if we've moved enough to consider it a drag (threshold for tap detection)
+      const moveThreshold = 10 // pixels - if moved more than this, it's a drag
+      const dx = Math.abs(clientX - touchStartPosRef.current.x)
+      const dy = Math.abs(clientY - touchStartPosRef.current.y)
+      
+      // Mark as dragging if movement exceeds threshold
+      if (dx > moveThreshold || dy > moveThreshold) {
+        isDraggingRef.current = true
+      }
+      
       const mouse = new Vector2()
       mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1
       mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1
@@ -595,7 +639,6 @@ function SkinViewerComponent() {
       raycaster.ray.intersectPlane(plane, intersectionPoint)
       
       if (intersectionPoint) {
-        isDraggingRef.current = true
         
         // Move character to intersection point
         const char = draggedCharRef.current
@@ -664,7 +707,24 @@ function SkinViewerComponent() {
       
       const char = draggedCharRef.current
       const dragDuration = Date.now() - dragStartTimeRef.current
+      const touchDuration = Date.now() - touchStartTimeRef.current
       const wasDragging = isDraggingRef.current
+      
+      // Check if this was a tap (quick touch without significant movement)
+      const clientX = event.clientX !== undefined ? event.clientX : event.changedTouches?.[0]?.clientX
+      const clientY = event.clientY !== undefined ? event.clientY : event.changedTouches?.[0]?.clientY
+      const moveThreshold = 10 // pixels
+      const tapThreshold = 300 // milliseconds
+      
+      let isTap = false
+      if (clientX !== undefined && clientY !== undefined) {
+        const dx = Math.abs(clientX - touchStartPosRef.current.x)
+        const dy = Math.abs(clientY - touchStartPosRef.current.y)
+        isTap = !wasDragging && touchDuration < tapThreshold && dx < moveThreshold && dy < moveThreshold
+      } else {
+        // Fallback for mouse events
+        isTap = !wasDragging && dragDuration < 200
+      }
       
       // Store the character before cleaning up drag state
       const draggedCharacter = char
@@ -673,9 +733,9 @@ function SkinViewerComponent() {
       draggedCharRef.current = null
       isDraggingRef.current = false
       
-      // If it was a quick click (< 200ms) and not dragged much, hit the character
-      if (!wasDragging && dragDuration < 200) {
-        // Quick click - hit the character
+      // If it was a tap, hit the character
+      if (isTap) {
+        // Quick tap/click - hit the character
         removeHoverEffect(draggedCharacter)
         hitCharacter(skinViewer, draggedCharacter)
         // Reset floating state
