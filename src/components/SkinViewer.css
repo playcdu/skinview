@@ -403,12 +403,12 @@
     .canvas-wrapper {
         width: 100vw;
         height: 100vh;
-        touch-action: none;
+        touch-action: pan-x pan-y pinch-zoom;
         -webkit-touch-callout: none;
     }
     
     #skinCanvas {
-        touch-action: none;
+        touch-action: pan-x pan-y pinch-zoom;
         -webkit-touch-callout: none;
     }
     
