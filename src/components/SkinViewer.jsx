@@ -323,6 +323,20 @@ function SkinViewerComponent() {
   const [selectedCluster, setSelectedCluster] = useState(null) // Selected cluster for formation
   const [formationMode, setFormationMode] = useState(false) // Whether formation mode is active
   const [clusterMenuOpen, setClusterMenuOpen] = useState(false) // Whether cluster menu is open
+  const [aggressiveness, setAggressiveness] = useState(0.5)
+  const [showNameTags, setShowNameTags] = useState(true)
+
+  // Refs for animation loop access
+  const aggressivenessRef = useRef(0.5)
+  const showNameTagsRef = useRef(true)
+  
+  useEffect(() => {
+    aggressivenessRef.current = aggressiveness
+  }, [aggressiveness])
+
+  useEffect(() => {
+    showNameTagsRef.current = showNameTags
+  }, [showNameTags])
   
   // Refs to access current state values in animation loop
   const formationModeRef = useRef(false)
@@ -897,9 +911,14 @@ function SkinViewerComponent() {
           const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
           materials.forEach(mat => {
             if (mat.color) {
-              mat.color.r *= redTint.r
-              mat.color.g *= redTint.g
-              mat.color.b *= redTint.b
+              // Store original color if not already stored
+              if (!mat.originalColor) {
+                mat.originalColor = mat.color.clone()
+              }
+              // Apply tint based on original color to prevent drift
+              mat.color.r = mat.originalColor.r * redTint.r
+              mat.color.g = mat.originalColor.g * redTint.g
+              mat.color.b = mat.originalColor.b * redTint.b
               mat.needsUpdate = true
             }
           })
@@ -1159,9 +1178,14 @@ function SkinViewerComponent() {
     
     // Function to add chat message (with deduplication)
     function addChatMessage(username, type) {
-      const message = type === 'login' 
-        ? `${username} Logged in!`
-        : `${username} Logged out!`
+      let message = '';
+      if (type === 'login') {
+        message = `${username} Logged in!`;
+      } else if (type === 'logout') {
+        message = `${username} Logged out!`;
+      } else if (type === 'death') {
+        message = `${username} was slain!`;
+      }
       
       setChatMessages(prev => {
         // Check if this exact message was added recently (within last 2 seconds)
@@ -2514,23 +2538,45 @@ function SkinViewerComponent() {
               char.waveArm = Math.random() > 0.5 ? 'left' : 'right'
             }
             
-            // Very low chance to decide to hit another player (check every 5 seconds)
+            // Decide to hit based on aggressiveness
             // Skip if in formation mode
             if (!char.formationMode && !char.hitTargetPlayer && !char.isHitting && char.animationState !== ANIMATION_STATES.RUN) {
               if (!char.hitDecisionTimer) {
-                char.hitDecisionTimer = 5.0 // Check every 5 seconds
+                // Timer scales with aggressiveness: 5s (low) to 0.5s (max)
+                const currentAggressiveness = aggressivenessRef.current
+                char.hitDecisionTimer = 5.0 - (currentAggressiveness * 4.5)
               }
               char.hitDecisionTimer -= deltaTime
               if (char.hitDecisionTimer <= 0) {
-                char.hitDecisionTimer = 5.0 // Reset timer
-                // Low chance (0.8% per check = ~1.6% per minute) - slightly increased
-                if (Math.random() < 0.008) {
+                const currentAggressiveness = aggressivenessRef.current
+                char.hitDecisionTimer = 5.0 - (currentAggressiveness * 4.5) // Reset timer based on current aggressiveness
+
+                // Base chance 0.8% (0.008). Max chance 100% (1.0)
+                // If aggressiveness is 0.5 (default), chance should be ~0.008 to match legacy behavior
+                let hitChance = 0.008
+                if (currentAggressiveness > 0.5) {
+                    // Scale from 0.008 to 1.0 as aggressiveness goes from 0.5 to 1.0
+                    hitChance = 0.008 + (currentAggressiveness - 0.5) * 2 * 0.992
+                } else {
+                    // Scale from 0 (at 0) to 0.008 (at 0.5)
+                    hitChance = currentAggressiveness * 2 * 0.008
+                }
+
+                if (Math.random() < hitChance) {
                   // Find a nearby player to target
                   let closestPlayer = null
                   let closestDist = Infinity
+                  
+                  // Throttle optimization: Don't check every frame if not necessary, 
+                  // but here we are already inside a timer so it's fine.
                   allCharacters.forEach((otherChar, otherIndex) => {
                     if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
                     if (otherChar.animationState === ANIMATION_STATES.RUN) return // Don't target running players
+                    if (otherChar.isDying) return // Don't target dying players
+                    
+                    // Check if this player is already being targeted by someone else
+                    const isAlreadyTargeted = allCharacters.some(c => c !== char && c.hitTargetPlayer === otherChar)
+                    if (isAlreadyTargeted && currentAggressiveness < 0.9) return // Only allow swarming at max aggressiveness
                     
                     const otherPath = otherChar.path
                     const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
@@ -2540,8 +2586,11 @@ function SkinViewerComponent() {
                     const distZ = path.z - otherZ
                     const dist = Math.sqrt(distX * distX + distZ * distZ)
                     
-                    // Only target players within reasonable range (50-200 units)
-                    if (dist >= 50 && dist <= 200 && dist < closestDist) {
+                    // Only target players within reasonable range (50-400 units - increased range)
+                    // At max aggressiveness, range is global (infinity)
+                    const maxSearchDist = currentAggressiveness > 0.9 ? Infinity : 400
+                    
+                    if (dist >= 20 && dist <= maxSearchDist && dist < closestDist) {
                       closestDist = dist
                       closestPlayer = otherChar
                     }
@@ -2586,9 +2635,8 @@ function SkinViewerComponent() {
               while (rotDiff > Math.PI) rotDiff -= Math.PI * 2
               rotDiff = Math.abs(rotDiff)
               
-              // Only hit if VERY close (within 4 units) AND facing the target (within 30 degrees = PI/6)
-              // Make sure we're actually very close - stricter distance check
-              if (dist < 4 && dist > 0.5 && rotDiff < Math.PI / 6) {
+              // Only hit if VERY close (within 12 units - increased from 4) AND facing the target (within 30 degrees = PI/6)
+              if (dist < 12 && dist > 0.5 && rotDiff < Math.PI / 6) {
                 // Trigger hit animation
                 char.isHitting = true
                 char.hitAnimationTimer = 0.5 // Hit animation duration
@@ -2599,8 +2647,11 @@ function SkinViewerComponent() {
                 // Verify target is still valid and close
                 if (targetChar && targetChar.path) {
                   targetChar.isBeingHit = true
-                  targetChar.hitTimer = 0.6 // Red overlay duration (increased from 0.3)
-                
+                  targetChar.hitTimer = 0.6 // Red overlay duration
+                  
+                  // Increment hit count
+                  targetChar.hitCount = (targetChar.hitCount || 0) + 1
+                  
                   // Apply red overlay to hit character
                   const redTint = { r: 1.5, g: 0.5, b: 0.5 }
                   targetChar.player.traverse((obj) => {
@@ -2608,44 +2659,100 @@ function SkinViewerComponent() {
                       const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                       materials.forEach(mat => {
                         if (mat.color) {
-                          mat.color.r *= redTint.r
-                          mat.color.g *= redTint.g
-                          mat.color.b *= redTint.b
+                          // Store original color if not already stored
+                          if (!mat.originalColor) {
+                            mat.originalColor = mat.color.clone()
+                          }
+                          // Apply tint based on original color to prevent drift
+                          mat.color.r = mat.originalColor.r * redTint.r
+                          mat.color.g = mat.originalColor.g * redTint.g
+                          mat.color.b = mat.originalColor.b * redTint.b
                           mat.needsUpdate = true
                         }
                       })
                     }
                   })
                   
-                  // Apply knockback to hit character (away from hitter) - increased intensity
-                  const knockbackDirection = new Vector3(distX / dist, 0, distZ / dist)
-                  const knockbackUp = 18 // Increased from 10
-                  const knockbackBack = 15 // Increased from 8
-                  
-                  targetChar.knockbackVelocity = {
-                    x: knockbackDirection.x * knockbackBack,
-                    y: knockbackUp,
-                    z: knockbackDirection.z * knockbackBack
+                  // Check for death (3 hits)
+                  if (targetChar.hitCount >= 3) {
+                      console.log(`💀 ${targetChar.username} died! (Hits: ${targetChar.hitCount})`)
+                      
+                      // Reset hit count
+                      targetChar.hitCount = 0
+                      
+                      // Apply knockback (fly away then respawn?)
+                      // For now, instant respawn logic with effects
+                      
+                      // Teleport to random location
+                       const maxTargetDistance = 450
+                       const angle = Math.random() * Math.PI * 2
+                       const radius = (maxTargetDistance * 0.5) + Math.random() * (maxTargetDistance * 0.5)
+                       const respawnX = Math.cos(angle) * radius
+                       const respawnZ = Math.sin(angle) * radius
+                       
+                       targetChar.group.position.x = respawnX
+                       targetChar.group.position.z = respawnZ
+                       targetChar.path.x = respawnX
+                       targetChar.path.z = respawnZ
+                       targetChar.path.targetX = respawnX // Stop moving
+                       targetChar.path.targetZ = respawnZ
+                       
+                       // Reset states
+                       targetChar.animationState = ANIMATION_STATES.IDLE
+                       targetChar.isHitting = false
+                       targetChar.hitTargetPlayer = null
+                       targetChar.runAwayTimer = undefined
+                       targetChar.shouldRunAway = false
+                       targetChar.knockbackVelocity = null
+                       
+                       // Clear hitter's target
+                       char.hitTargetPlayer = null
+                       path.changeTargetTime = 0
+                  } else {
+                      // Normal Hit Logic (Knockback + Run/Fight)
+                      
+                      // Apply knockback to hit character (away from hitter)
+                      const knockbackDirection = new Vector3(distX / dist, 0, distZ / dist)
+                      const knockbackUp = 18
+                      const knockbackBack = 15
+                      
+                      targetChar.knockbackVelocity = {
+                        x: knockbackDirection.x * knockbackBack,
+                        y: knockbackUp,
+                        z: knockbackDirection.z * knockbackBack
+                      }
+                      targetChar.gravity = 0.5
+                      targetChar.knockbackStartTime = Date.now()
+                      targetChar.knockbackMinDuration = 0.8
+                      
+                      // Decide whether to Run Away or Fight Back based on aggressiveness
+                      const currentAggressiveness = aggressivenessRef.current
+                      // If aggressiveness is 1.0, they almost always fight back
+                      // If 0, they almost always run
+                      if (Math.random() < currentAggressiveness) {
+                          // Fight Back!
+                          console.log(`⚔️ ${targetChar.username} is fighting back against ${char.username}!`)
+                          targetChar.runAwayTimer = undefined
+                          targetChar.shouldRunAway = false
+                          targetChar.hitTargetPlayer = char // Target the hitter
+                          targetChar.path.changeTargetTime = 999
+                          targetChar.wasHitByPlayer = true
+                      } else {
+                          // Run Away
+                          targetChar.runAwayTimer = 6.0 + Math.random() * 4.0
+                          
+                          const runAwayX = targetX - knockbackDirection.x * 180
+                          const runAwayZ = targetZ - knockbackDirection.z * 180
+                          const centerBias = 0.1
+                          targetChar.runAwayTarget = {
+                            x: runAwayX * (1 - centerBias) + 0 * centerBias,
+                            z: runAwayZ * (1 - centerBias) + 0 * centerBias
+                          }
+                          targetChar.runAwayFrom = char
+                          targetChar.shouldRunAway = true
+                          targetChar.wasHitByPlayer = true
+                      }
                   }
-                  targetChar.gravity = 0.5
-                  targetChar.knockbackStartTime = Date.now() // Track when knockback started
-                  targetChar.knockbackMinDuration = 0.8 // Minimum knockback duration in seconds
-                  
-                  // Set up run away for after knockback finishes (don't start running yet)
-                  targetChar.runAwayTimer = 6.0 + Math.random() * 4.0 // Run for 6-10 seconds (longer duration)
-                  // Run away from hitter, but bias slightly towards center (0, 0)
-                  const runAwayX = targetX - knockbackDirection.x * 180 // Increased from 100 to 180 units
-                  const runAwayZ = targetZ - knockbackDirection.z * 180 // Increased from 100 to 180 units
-                  // Bias towards center: blend 90% away direction, 10% center direction
-                  const centerBias = 0.1
-                  targetChar.runAwayTarget = {
-                    x: runAwayX * (1 - centerBias) + 0 * centerBias, // Slight bias towards center (x=0)
-                    z: runAwayZ * (1 - centerBias) + 0 * centerBias  // Slight bias towards center (z=0)
-                  }
-                  targetChar.runAwayFrom = char // Remember who to run from
-                  targetChar.shouldRunAway = true // Flag to start running after knockback finishes
-                  // Don't set animation state to RUN yet - wait for knockback to finish
-                  targetChar.wasHitByPlayer = true // Mark that this was a player-to-player hit
                   
                   // Clear hit target - we've hit them
                   char.hitTargetPlayer = null
@@ -2655,7 +2762,7 @@ function SkinViewerComponent() {
                   char.hitTargetPlayer = null
                   path.changeTargetTime = 0
                 }
-              } else if (dist > 250) {
+              } else if (dist > 600) { // Increased from 250 to 600 to match search range
                 // Target got too far away, give up
                 char.hitTargetPlayer = null
                 path.changeTargetTime = 0 // Allow new target selection
@@ -3178,9 +3285,8 @@ function SkinViewerComponent() {
             if (!char.hitTargetPlayer) {
               const avoidanceRadius = 30 // Only avoid when very close
               const minDistance = 25 // Minimum distance before forcing target change
-              
-              // Calculate local density (how many characters are nearby)
               const densityRadius = 80 // Check density in 80 unit radius
+              
               let localDensity = 0
               
               allCharacters.forEach((otherChar, otherIndex) => {
@@ -3216,6 +3322,7 @@ function SkinViewerComponent() {
                     const newTargetZ = path.z + (distZ / dist) * escapeDist
                     
                     // Check if new target is within screen bounds
+                    const maxTargetDistance = 450 // Re-declare here as it's needed
                     const newTargetDist = Math.sqrt(newTargetX ** 2 + newTargetZ ** 2)
                     if (newTargetDist < maxTargetDistance) {
                       // Only change target if it's far enough from current position
@@ -3472,11 +3579,10 @@ function SkinViewerComponent() {
                   if (obj.material) {
                     const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                     materials.forEach(mat => {
-                      if (mat.color) {
-                        // Reset to original color (divide by the tint we applied)
-                        mat.color.r /= 1.5
-                        mat.color.g /= 0.5
-                        mat.color.b /= 0.5
+                      if (mat.color && mat.originalColor) {
+                        // Restore original color
+                        mat.color.copy(mat.originalColor)
+                        delete mat.originalColor // Clear stored color
                         mat.needsUpdate = true
                       }
                     })
@@ -3543,6 +3649,11 @@ function SkinViewerComponent() {
             let newZ = path.z
             // isBeingDragged is already declared above in the animation state logic
             
+            // Safety check for RUN state without target
+            if (char.animationState === ANIMATION_STATES.RUN && !char.runAwayTarget && !char.knockbackVelocity) {
+                char.animationState = ANIMATION_STATES.WALK
+            }
+
             // Handle running away movement (faster than normal walking)
             if (char.animationState === ANIMATION_STATES.RUN && char.runAwayTarget && !char.knockbackVelocity) {
               // Move towards run away target at faster speed
@@ -3601,11 +3712,10 @@ function SkinViewerComponent() {
                   if (obj.material) {
                     const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                     materials.forEach(mat => {
-                      if (mat.color) {
-                        // Reset to original color (divide by the tint we applied)
-                        mat.color.r /= 1.5
-                        mat.color.g /= 0.5
-                        mat.color.b /= 0.5
+                      if (mat.color && mat.originalColor) {
+                        // Restore original color
+                        mat.color.copy(mat.originalColor)
+                        delete mat.originalColor // Clear stored color
                         mat.needsUpdate = true
                       }
                     })
@@ -3614,6 +3724,29 @@ function SkinViewerComponent() {
                 char.isHit = false
                 char.hitTimer = undefined
               }
+            } else if (char.isBeingHit && char.hitTimer !== undefined && !char.wasHitByPlayer) {
+                // This handles the "turn red when clicked" logic which was previously missing the turn-off logic
+                // because it shares the hitTimer but uses isBeingHit for player-to-player hits
+                // We need to make sure we clear the red tint for user clicks too
+                 char.hitTimer -= deltaTime
+                  if (char.hitTimer <= 0) {
+                    // Remove red overlay
+                    char.player.traverse((obj) => {
+                      if (obj.material) {
+                        const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
+                        materials.forEach(mat => {
+                          if (mat.color && mat.originalColor) {
+                            // Restore original color
+                            mat.color.copy(mat.originalColor)
+                            delete mat.originalColor // Clear stored color
+                            mat.needsUpdate = true
+                          }
+                        })
+                      }
+                    })
+                    char.isBeingHit = false
+                    char.hitTimer = undefined
+                  }
             }
             
             // Apply animation based on state
@@ -3645,6 +3778,7 @@ function SkinViewerComponent() {
             
             // Make nametag face camera (sprites auto-face camera, but ensure it's visible)
             if (char.nameTag) {
+              char.nameTag.visible = showNameTagsRef.current
               // Sprites automatically face camera, but ensure it's positioned correctly
               char.nameTag.position.y = 25 // Keep it well above character's head
             }
@@ -3798,6 +3932,30 @@ function SkinViewerComponent() {
           </button>
           {clusterMenuOpen && (
             <div className="cluster-selector">
+              <div className="cluster-selector-header">Settings</div>
+              <div className="slider-control" style={{ padding: '0 10px 10px 10px', marginBottom: '5px' }}>
+                <label htmlFor="aggressiveness">Aggressiveness: {Math.round(aggressiveness * 100)}%</label>
+                <input 
+                  id="aggressiveness"
+                  type="range" 
+                  min="0" 
+                  max="1" 
+                  step="0.01" 
+                  value={aggressiveness} 
+                  onChange={(e) => setAggressiveness(parseFloat(e.target.value))} 
+                />
+              </div>
+              <div className="slider-control" style={{ padding: '0 10px 15px 10px', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label htmlFor="nametags" style={{ cursor: 'pointer' }}>Show Name Tags</label>
+                <input 
+                  id="nametags"
+                  type="checkbox" 
+                  checked={showNameTags} 
+                  onChange={(e) => setShowNameTags(e.target.checked)}
+                  style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                />
+              </div>
+              
               <div className="cluster-selector-header">Clusters ({clusters.length})</div>
               <div className="cluster-list">
                 {clusters.map((cluster, index) => {
