@@ -2644,7 +2644,7 @@ function SkinViewerComponent() {
                     if (obj.material) {
                       const materials = Array.isArray(obj.material) ? obj.material : [obj.material]
                       materials.forEach(mat => {
-                        if (mat.color) {
+                        if (mat.color && !targetChar.isBeingHit) { // Only apply if not already hit
                           mat.color.r *= redTint.r
                           mat.color.g *= redTint.g
                           mat.color.b *= redTint.b
@@ -3270,76 +3270,58 @@ function SkinViewerComponent() {
               
               let localDensity = 0
               
-              // Optimization: Throttle expensive proximity checks
-              // Update every ~100ms (staggered)
-              const now = Date.now()
-              if (!char.lastAvoidanceUpdate || now - char.lastAvoidanceUpdate > 100) {
-                  char.lastAvoidanceUpdate = now + (Math.random() * 20)
+              allCharacters.forEach((otherChar, otherIndex) => {
+                if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                
+                const otherPath = otherChar.path
+                const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
+                const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
+                
+                const distX = path.x - otherX
+                const distZ = path.z - otherZ
+                const dist = Math.sqrt(distX * distX + distZ * distZ)
+                
+                // Count nearby characters for density calculation
+                if (dist < densityRadius && dist > 0) {
+                  localDensity += (densityRadius - dist) / densityRadius // Weight by distance
+                }
+                
+                // Only avoid when very close - prevent stacking but don't cause jiggling
+                if (dist < avoidanceRadius && dist > 0) {
+                  const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
+                  // Very minimal avoidance force - just enough to prevent stacking
+                  avoidX += (distX / dist) * avoidStrength * 0.5
+                  avoidZ += (distZ / dist) * avoidStrength * 0.5
                   
-                  let loopAvoidX = 0
-                  let loopAvoidZ = 0
-                  let loopDensity = 0
-                  
-                  allCharacters.forEach((otherChar, otherIndex) => {
-                    if (otherIndex === index || !otherChar || !otherChar.path || !otherChar.group) return
+                  // Only override target if extremely close (prevent actual collision)
+                  // BUT: Don't override if we're very close to our goal (< 15 units) - prioritize reaching destination
+                  if (dist < minDistance && char.animationState !== ANIMATION_STATES.RUN && distance > 15) {
+                    // Calculate escape direction (away from other character)
+                    // Make sure escape target is a good distance away
+                    const escapeDist = 80 // Move 80 units away (good distance)
+                    const newTargetX = path.x + (distX / dist) * escapeDist
+                    const newTargetZ = path.z + (distZ / dist) * escapeDist
                     
-                    const otherPath = otherChar.path
-                    const otherX = otherPath.x !== undefined ? otherPath.x : otherChar.group.position.x
-                    const otherZ = otherPath.z !== undefined ? otherPath.z : otherChar.group.position.z
-                    
-                    const distX = path.x - otherX
-                    const distZ = path.z - otherZ
-                    const dist = Math.sqrt(distX * distX + distZ * distZ)
-                    
-                    // Count nearby characters for density calculation
-                    if (dist < densityRadius && dist > 0) {
-                      loopDensity += (densityRadius - dist) / densityRadius // Weight by distance
-                    }
-                    
-                    // Only avoid when very close - prevent stacking but don't cause jiggling
-                    if (dist < avoidanceRadius && dist > 0) {
-                      const avoidStrength = (avoidanceRadius - dist) / avoidanceRadius
-                      // Very minimal avoidance force - just enough to prevent stacking
-                      loopAvoidX += (distX / dist) * avoidStrength * 0.5
-                      loopAvoidZ += (distZ / dist) * avoidStrength * 0.5
-                      
-                      // Only override target if extremely close (prevent actual collision)
-                      // BUT: Don't override if we're very close to our goal (< 15 units) - prioritize reaching destination
-                      if (dist < minDistance && char.animationState !== ANIMATION_STATES.RUN && distance > 15) {
-                        // Calculate escape direction (away from other character)
-                        // Make sure escape target is a good distance away
-                        const escapeDist = 80 // Move 80 units away (good distance)
-                        const newTargetX = path.x + (distX / dist) * escapeDist
-                        const newTargetZ = path.z + (distZ / dist) * escapeDist
+                    // Check if new target is within screen bounds
+                    const maxTargetDistance = 450 // Re-declare here as it's needed
+                    const newTargetDist = Math.sqrt(newTargetX ** 2 + newTargetZ ** 2)
+                    if (newTargetDist < maxTargetDistance) {
+                      // Only change target if it's far enough from current position
+                      const distToNewTarget = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
+                      if (distToNewTarget >= 50) { // Ensure we're moving a good distance
+                        path.targetX = newTargetX
+                        path.targetZ = newTargetZ
+                        path.changeTargetTime = 0.3 // Quick reaction to avoid collision
                         
-                        // Check if new target is within screen bounds
-                        const maxTargetDistance = 450 // Re-declare here as it's needed
-                        const newTargetDist = Math.sqrt(newTargetX ** 2 + newTargetZ ** 2)
-                        if (newTargetDist < maxTargetDistance) {
-                          // Only change target if it's far enough from current position
-                          const distToNewTarget = Math.sqrt((newTargetX - path.x) ** 2 + (newTargetZ - path.z) ** 2)
-                          if (distToNewTarget >= 50) { // Ensure we're moving a good distance
-                            path.targetX = newTargetX
-                            path.targetZ = newTargetZ
-                            path.changeTargetTime = 0.3 // Quick reaction to avoid collision
-                            
-                            // Also update dx/dz to reflect new target
-                            // We can't easily update parent scope 'dx', 'dz', 'distance' here from inside throttled block
-                            // But path.targetX/Z are updated, so next frame will pick it up.
-                          }
-                        }
+                        // Also update dx/dz to reflect new target
+                        dx = path.targetX - path.x
+                        dz = path.targetZ - path.z
+                        distance = Math.sqrt(dx * dx + dz * dz)
                       }
                     }
-                  })
-                  
-                  char.cachedLoopAvoidance = { x: loopAvoidX, z: loopAvoidZ, density: loopDensity }
-              }
-              
-              if (char.cachedLoopAvoidance) {
-                  avoidX += char.cachedLoopAvoidance.x
-                  avoidZ += char.cachedLoopAvoidance.z
-                  localDensity = char.cachedLoopAvoidance.density
-              }
+                  }
+                }
+              })
               
               // If in a crowded area, prefer moving towards less crowded areas
               // But add randomness and avoid other characters' targets to prevent clustering
