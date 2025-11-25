@@ -401,15 +401,56 @@
 
 @media (max-width: 768px) {
     .canvas-wrapper {
-        width: 200px;
-        height: 300px;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none;
+        -webkit-touch-callout: none;
+    }
+    
+    #skinCanvas {
+        touch-action: none;
+        -webkit-touch-callout: none;
     }
     
     .chatbox {
-        width: 250px;
+        width: calc(100vw - 40px);
+        max-width: 300px;
         max-height: 300px;
         bottom: 10px;
         right: 10px;
+        left: auto;
+    }
+    
+    .controls {
+        bottom: 1rem;
+        left: 50%;
+        transform: translateX(-50%);
+        width: calc(100vw - 40px);
+        max-width: 400px;
+        padding: 0.75rem 1rem;
+    }
+    
+    .slider-control {
+        min-width: auto;
+        width: 100%;
+    }
+    
+    .cluster-selector-container {
+        top: 10px;
+        right: 10px;
+    }
+    
+    .player-count {
+        top: 10px;
+        left: 10px;
+        font-size: 11px;
+        padding: 6px 10px;
+    }
+    
+    .info-box {
+        top: 10px;
+        font-size: 12px;
+        padding: 10px 16px;
     }
 }
 
