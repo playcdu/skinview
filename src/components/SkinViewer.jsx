@@ -513,6 +513,10 @@ function SkinViewerComponent() {
     
     // Handle mouse move for hover detection
     const handleMouseMove = (event) => {
+      // Skip if multi-touch (pinch zoom gesture) - allow browser to handle zoom
+      if (event.touches && event.touches.length > 1) {
+        return // Let browser handle pinch zoom
+      }
       event.preventDefault() // Prevent text selection
       const hoveredChar = findCharacterUnderMouse(event)
       
